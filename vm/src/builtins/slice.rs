@@ -25,9 +25,9 @@ impl PyPayload for PySlice {
     }
 }
 
-#[pyimpl(with(Hashable, Comparable))]
+#[pyclass(with(Hashable, Comparable))]
 impl PySlice {
-    #[pyproperty]
+    #[pygetset]
     fn start(&self, vm: &VirtualMachine) -> PyObjectRef {
         self.start.clone().to_pyobject(vm)
     }
@@ -39,12 +39,12 @@ impl PySlice {
         }
     }
 
-    #[pyproperty]
+    #[pygetset]
     pub(crate) fn stop(&self, _vm: &VirtualMachine) -> PyObjectRef {
         self.stop.clone()
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn step(&self, vm: &VirtualMachine) -> PyObjectRef {
         self.step.clone().to_pyobject(vm)
     }
@@ -204,7 +204,7 @@ impl PySlice {
         (Option<PyObjectRef>, PyObjectRef, Option<PyObjectRef>),
     )> {
         Ok((
-            zelf.class().clone(),
+            zelf.class().to_owned(),
             (zelf.start.clone(), zelf.stop.clone(), zelf.step.clone()),
         ))
     }
@@ -278,7 +278,7 @@ impl Constructor for PyEllipsis {
     }
 }
 
-#[pyimpl(with(Constructor))]
+#[pyclass(with(Constructor))]
 impl PyEllipsis {
     #[pymethod(magic)]
     fn repr(&self) -> String {

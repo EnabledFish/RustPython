@@ -4,7 +4,7 @@ use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, ModuleError};
 use instructions::FunctionCompiler;
-use rustpython_bytecode as bytecode;
+use rustpython_compiler_core as bytecode;
 use std::{fmt, mem::ManuallyDrop};
 
 #[derive(Debug, thiserror::Error)]
@@ -35,7 +35,8 @@ struct Jit {
 
 impl Jit {
     fn new() -> Self {
-        let builder = JITBuilder::new(cranelift_module::default_libcall_names());
+        let builder = JITBuilder::new(cranelift_module::default_libcall_names())
+            .expect("Failed to build JITBuilder");
         let module = JITModule::new(builder);
         Self {
             builder_context: FunctionBuilderContext::new(),
@@ -80,12 +81,7 @@ impl Jit {
             &self.ctx.func.signature,
         )?;
 
-        self.module.define_function(
-            id,
-            &mut self.ctx,
-            &mut codegen::binemit::NullTrapSink {},
-            &mut codegen::binemit::NullStackMapSink {},
-        )?;
+        self.module.define_function(id, &mut self.ctx)?;
 
         self.module.clear_context(&mut self.ctx);
 
@@ -163,7 +159,7 @@ impl JitSig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JitType {
     Int,

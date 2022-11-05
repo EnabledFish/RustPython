@@ -189,8 +189,6 @@ class BinASCIITest(unittest.TestCase):
         with self.assertRaises(TypeError):
             binascii.b2a_uu(b"", True)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_crc_hqx(self):
         crc = binascii.crc_hqx(self.type2test(b"Test the CRC-32 of"), 0)
         crc = binascii.crc_hqx(self.type2test(b" this string."), crc)
@@ -222,8 +220,6 @@ class BinASCIITest(unittest.TestCase):
         res = binascii.rledecode_hqx(b)
         self.assertEqual(res, self.rawdata)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_rle(self):
         # test repetition with a repetition longer than the limit of 255
         data = (b'a' * 100 + b'b' + b'c' * 300)
@@ -238,8 +234,6 @@ class BinASCIITest(unittest.TestCase):
         decoded = binascii.rledecode_hqx(encoded)
         self.assertEqual(decoded, data)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hex(self):
         # test hexlification
         s = b'{s\005\000\000\000worldi\002\000\000\000s\005\000\000\000helloi\001\000\000\0000'
@@ -272,8 +266,6 @@ class BinASCIITest(unittest.TestCase):
         expected1 = s.hex(':').encode('ascii')
         self.assertEqual(binascii.b2a_hex(self.type2test(s), ':'), expected1)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_qp(self):
         type2test = self.type2test
         a2b_qp = binascii.a2b_qp

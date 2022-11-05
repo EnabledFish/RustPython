@@ -1,8 +1,9 @@
 use super::{
-    set::PySetInner, IterStatus, PositionIterInternal, PyBaseExceptionRef, PyGenericAlias, PySet,
-    PyStrRef, PyTupleRef, PyType, PyTypeRef,
+    set::PySetInner, IterStatus, PositionIterInternal, PyBaseExceptionRef, PyGenericAlias,
+    PyMappingProxy, PySet, PyStrRef, PyTupleRef, PyType, PyTypeRef,
 };
 use crate::{
+    atomic_func,
     builtins::{
         iter::{builtins_iter, builtins_reversed},
         type_::PyAttributes,
@@ -15,6 +16,7 @@ use crate::{
     function::{
         ArgIterable, FuncArgs, KwArgs, OptionalArg, PyArithmeticValue::*, PyComparisonValue,
     },
+    iter::PyExactSizeIterator,
     protocol::{PyIterIter, PyIterReturn, PyMappingMethods, PySequenceMethods},
     recursion::ReprGuard,
     types::{
@@ -29,15 +31,6 @@ use std::fmt;
 
 pub type DictContentType = dictdatatype::Dict;
 
-/// dict() -> new empty dictionary
-/// dict(mapping) -> new dictionary initialized from a mapping object's
-///    (key, value) pairs
-/// dict(iterable) -> new dictionary initialized as if via:
-///    d = {}
-///    for k, v in iterable:
-///        d\[k\] = v
-/// dict(**kwargs) -> new dictionary initialized with the name=value pairs
-///    in the keyword argument list.  For example:  dict(one=1, two=2)
 #[pyclass(module = false, name = "dict")]
 #[derive(Default)]
 pub struct PyDict {
@@ -69,20 +62,13 @@ impl PyDict {
         &self.entries
     }
 
-    pub(crate) fn from_entries(entries: DictContentType) -> Self {
-        Self { entries }
-    }
-
     // Used in update and ior.
-    fn merge_object(
-        dict: &DictContentType,
-        other: PyObjectRef,
-        vm: &VirtualMachine,
-    ) -> PyResult<()> {
+    pub(crate) fn merge_object(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         let other = match other.downcast_exact(vm) {
-            Ok(dict_other) => return Self::merge_dict(dict, dict_other, vm),
+            Ok(dict_other) => return self.merge_dict(dict_other, vm),
             Err(other) => other,
         };
+        let dict = &self.entries;
         if let Some(keys) = vm.get_method(other.clone(), vm.ctx.intern_str("keys")) {
             let keys = vm.invoke(&keys?, ())?.get_iter(vm)?;
             while let PyIterReturn::Return(key) = keys.next(vm)? {
@@ -111,11 +97,8 @@ impl PyDict {
         Ok(())
     }
 
-    fn merge_dict(
-        dict: &DictContentType,
-        dict_other: PyDictRef,
-        vm: &VirtualMachine,
-    ) -> PyResult<()> {
+    fn merge_dict(&self, dict_other: PyDictRef, vm: &VirtualMachine) -> PyResult<()> {
+        let dict = &self.entries;
         let dict_size = &dict_other.size();
         for (key, value) in &dict_other {
             dict.insert(vm, &*key, value)?;
@@ -216,7 +199,7 @@ impl PyDict {
 
 // Python dict methods:
 #[allow(clippy::len_without_is_empty)]
-#[pyimpl(
+#[pyclass(
     with(
         Constructor,
         Initializer,
@@ -297,7 +280,7 @@ impl PyDict {
     }
 
     #[pymethod]
-    fn clear(&self) {
+    pub fn clear(&self) {
         self.entries.clear()
     }
 
@@ -366,7 +349,7 @@ impl PyDict {
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         if let OptionalArg::Present(dict_obj) = dict_obj {
-            Self::merge_object(&self.entries, dict_obj, vm)?;
+            self.merge_object(dict_obj, vm)?;
         }
         for (key, value) in kwargs.into_iter() {
             self.entries.insert(vm, &key, value)?;
@@ -376,7 +359,7 @@ impl PyDict {
 
     #[pymethod(magic)]
     fn ior(zelf: PyRef<Self>, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        PyDict::merge_object(&zelf.entries, other, vm)?;
+        zelf.merge_object(other, vm)?;
         Ok(zelf)
     }
 
@@ -385,7 +368,7 @@ impl PyDict {
         let dicted: Result<PyDictRef, _> = other.downcast();
         if let Ok(other) = dicted {
             let other_cp = other.copy();
-            PyDict::merge_dict(&other_cp.entries, zelf, vm)?;
+            other_cp.merge_dict(zelf, vm)?;
             return Ok(other_cp.into_pyobject(vm));
         }
         Ok(vm.ctx.not_implemented())
@@ -396,7 +379,7 @@ impl PyDict {
         let dicted: Result<PyDictRef, _> = other.downcast();
         if let Ok(other) = dicted {
             let self_cp = self.copy();
-            PyDict::merge_dict(&self_cp.entries, other, vm)?;
+            self_cp.merge_dict(other, vm)?;
             return Ok(self_cp.into_pyobject(vm));
         }
         Ok(vm.ctx.not_implemented())
@@ -461,27 +444,35 @@ impl Initializer for PyDict {
 }
 
 impl AsMapping for PyDict {
-    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-        length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
-        subscript: Some(|mapping, needle, vm| {
-            Self::mapping_downcast(mapping).inner_getitem(needle, vm)
-        }),
-        ass_subscript: Some(|mapping, needle, value, vm| {
-            let zelf = Self::mapping_downcast(mapping);
-            if let Some(value) = value {
-                zelf.inner_setitem(needle, value, vm)
-            } else {
-                zelf.inner_delitem(needle, vm)
-            }
-        }),
-    };
+    fn as_mapping() -> &'static PyMappingMethods {
+        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+            length: atomic_func!(|mapping, _vm| Ok(PyDict::mapping_downcast(mapping).len())),
+            subscript: atomic_func!(|mapping, needle, vm| {
+                PyDict::mapping_downcast(mapping).inner_getitem(needle, vm)
+            }),
+            ass_subscript: atomic_func!(|mapping, needle, value, vm| {
+                let zelf = PyDict::mapping_downcast(mapping);
+                if let Some(value) = value {
+                    zelf.inner_setitem(needle, value, vm)
+                } else {
+                    zelf.inner_delitem(needle, vm)
+                }
+            }),
+        };
+        &AS_MAPPING
+    }
 }
 
 impl AsSequence for PyDict {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        contains: Some(|seq, target, vm| Self::sequence_downcast(seq).entries.contains(vm, target)),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+            contains: atomic_func!(|seq, target, vm| PyDict::sequence_downcast(seq)
+                .entries
+                .contains(vm, target)),
+            ..PySequenceMethods::NOT_IMPLEMENTED
+        };
+        &AS_SEQUENCE
+    }
 }
 
 impl Comparable for PyDict {
@@ -668,7 +659,7 @@ impl Iterator for DictIter {
     }
 }
 
-#[pyimpl]
+#[pyclass]
 trait DictView: PyPayload + PyClassDef + Iterable
 where
     Self::ReverseIter: PyPayload,
@@ -757,7 +748,7 @@ macro_rules! dict_view {
             }
         }
 
-        #[pyimpl(with(Constructor, IterNext))]
+        #[pyclass(with(Constructor, IterNext))]
         impl $iter_name {
             fn new(dict: PyDictRef) -> Self {
                 $iter_name {
@@ -830,7 +821,7 @@ macro_rules! dict_view {
             }
         }
 
-        #[pyimpl(with(Constructor, IterNext))]
+        #[pyclass(with(Constructor, IterNext))]
         impl $reverse_iter_name {
             fn new(dict: PyDictRef) -> Self {
                 let size = dict.size();
@@ -942,7 +933,7 @@ dict_view! {
 }
 
 // Set operations defined on set-like views of the dictionary.
-#[pyimpl]
+#[pyclass]
 trait ViewSetOps: DictView {
     fn to_set(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PySetInner> {
         let len = zelf.dict().len();
@@ -998,23 +989,30 @@ trait ViewSetOps: DictView {
     ) -> PyResult<PyComparisonValue> {
         match_class!(match other {
             ref dictview @ Self => {
-                PyDict::inner_cmp(
+                return PyDict::inner_cmp(
                     zelf.dict(),
                     dictview.dict(),
                     op,
                     !zelf.class().is(vm.ctx.types.dict_keys_type),
                     vm,
-                )
+                );
             }
             ref _set @ PySet => {
                 let inner = Self::to_set(zelf.to_owned(), vm)?;
                 let zelf_set = PySet { inner }.into_pyobject(vm);
-                PySet::cmp(zelf_set.downcast_ref().unwrap(), other, op, vm)
+                return PySet::cmp(zelf_set.downcast_ref().unwrap(), other, op, vm);
             }
+            ref _dictitems @ PyDictItems => {}
+            ref _dictkeys @ PyDictKeys => {}
             _ => {
-                Ok(NotImplemented)
+                return Ok(NotImplemented);
             }
-        })
+        });
+        let lhs: Vec<PyObjectRef> = zelf.as_object().to_owned().try_into_value(vm)?;
+        let rhs: Vec<PyObjectRef> = other.to_owned().try_into_value(vm)?;
+        lhs.iter()
+            .richcompare(rhs.iter(), op, vm)
+            .map(PyComparisonValue::Implemented)
     }
 
     #[pymethod]
@@ -1027,11 +1025,16 @@ trait ViewSetOps: DictView {
 }
 
 impl ViewSetOps for PyDictKeys {}
-#[pyimpl(with(DictView, Constructor, Comparable, Iterable, ViewSetOps, AsSequence))]
+#[pyclass(with(DictView, Constructor, Comparable, Iterable, ViewSetOps, AsSequence))]
 impl PyDictKeys {
     #[pymethod(magic)]
     fn contains(zelf: PyRef<Self>, key: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
         zelf.dict().contains(key, vm)
+    }
+
+    #[pygetset]
+    fn mapping(zelf: PyRef<Self>) -> PyMappingProxy {
+        PyMappingProxy::from(zelf.dict().clone())
     }
 }
 impl Unconstructible for PyDictKeys {}
@@ -1048,20 +1051,23 @@ impl Comparable for PyDictKeys {
 }
 
 impl AsSequence for PyDictKeys {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
-        contains: Some(|seq, target, vm| {
-            Self::sequence_downcast(seq)
-                .dict
-                .entries
-                .contains(vm, target)
-        }),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+            length: atomic_func!(|seq, _vm| Ok(PyDictKeys::sequence_downcast(seq).len())),
+            contains: atomic_func!(|seq, target, vm| {
+                PyDictKeys::sequence_downcast(seq)
+                    .dict
+                    .entries
+                    .contains(vm, target)
+            }),
+            ..PySequenceMethods::NOT_IMPLEMENTED
+        };
+        &AS_SEQUENCE
+    }
 }
 
 impl ViewSetOps for PyDictItems {}
-#[pyimpl(with(DictView, Constructor, Comparable, Iterable, ViewSetOps, AsSequence))]
+#[pyclass(with(DictView, Constructor, Comparable, Iterable, ViewSetOps, AsSequence))]
 impl PyDictItems {
     #[pymethod(magic)]
     fn contains(zelf: PyRef<Self>, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
@@ -1082,6 +1088,10 @@ impl PyDictItems {
         let found = PyDict::getitem(zelf.dict().clone(), key, vm)?;
         vm.identical_or_equal(&found, &value)
     }
+    #[pygetset]
+    fn mapping(zelf: PyRef<Self>) -> PyMappingProxy {
+        PyMappingProxy::from(zelf.dict().clone())
+    }
 }
 impl Unconstructible for PyDictItems {}
 
@@ -1097,27 +1107,38 @@ impl Comparable for PyDictItems {
 }
 
 impl AsSequence for PyDictItems {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
-        contains: Some(|seq, target, vm| {
-            Self::sequence_downcast(seq)
-                .dict
-                .entries
-                .contains(vm, target)
-        }),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+            length: atomic_func!(|seq, _vm| Ok(PyDictItems::sequence_downcast(seq).len())),
+            contains: atomic_func!(|seq, target, vm| {
+                PyDictItems::sequence_downcast(seq)
+                    .dict
+                    .entries
+                    .contains(vm, target)
+            }),
+            ..PySequenceMethods::NOT_IMPLEMENTED
+        };
+        &AS_SEQUENCE
+    }
 }
 
-#[pyimpl(with(DictView, Constructor, Iterable, AsSequence))]
-impl PyDictValues {}
+#[pyclass(with(DictView, Constructor, Iterable, AsSequence))]
+impl PyDictValues {
+    #[pygetset]
+    fn mapping(zelf: PyRef<Self>) -> PyMappingProxy {
+        PyMappingProxy::from(zelf.dict().clone())
+    }
+}
 impl Unconstructible for PyDictValues {}
 
 impl AsSequence for PyDictValues {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+            length: atomic_func!(|seq, _vm| Ok(PyDictValues::sequence_downcast(seq).len())),
+            ..PySequenceMethods::NOT_IMPLEMENTED
+        };
+        &AS_SEQUENCE
+    }
 }
 
 pub(crate) fn init(context: &Context) {

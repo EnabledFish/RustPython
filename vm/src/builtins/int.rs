@@ -1,5 +1,6 @@
 use super::{float, PyByteArray, PyBytes, PyStr, PyStrRef, PyType, PyTypeRef};
 use crate::{
+    atomic_func,
     bytesinner::PyBytesInner,
     class::PyClassImpl,
     common::hash,
@@ -17,24 +18,11 @@ use crate::{
 use bstr::ByteSlice;
 use num_bigint::{BigInt, BigUint, Sign};
 use num_integer::Integer;
+use num_rational::Ratio;
 use num_traits::{One, Pow, PrimInt, Signed, ToPrimitive, Zero};
-use std::ops::Neg;
+use std::ops::{Div, Neg};
 use std::{fmt, ops::Not};
 
-/// int(x=0) -> integer
-/// int(x, base=10) -> integer
-///
-/// Convert a number or string to an integer, or return 0 if no arguments
-/// are given.  If x is a number, return x.__int__().  For floating point
-/// numbers, this truncates towards zero.
-///
-/// If x is not a number or if base is given, then x must be a string,
-/// bytes, or bytearray instance representing an integer literal in the
-/// given base.  The literal can be preceded by '+' or '-' and be surrounded
-/// by whitespace.  The base defaults to 10.  Valid bases are 0 and 2-36.
-/// Base 0 means to interpret the base from the string as an integer literal.
-/// >>> int('0b100', base=0)
-/// 4
 #[pyclass(module = false, name = "int")]
 #[derive(Debug)]
 pub struct PyInt {
@@ -68,7 +56,7 @@ impl PyPayload for PyInt {
     }
 
     fn special_retrieve(vm: &VirtualMachine, obj: &PyObject) -> Option<PyResult<PyRef<Self>>> {
-        Some(vm.to_index(obj))
+        Some(obj.try_index(vm))
     }
 }
 
@@ -208,34 +196,19 @@ where
 
 fn inner_truediv(i1: &BigInt, i2: &BigInt, vm: &VirtualMachine) -> PyResult {
     if i2.is_zero() {
-        return Err(vm.new_zero_division_error("integer division by zero".to_owned()));
+        return Err(vm.new_zero_division_error("division by zero".to_owned()));
     }
 
-    let value = if let (Some(f1), Some(f2)) = (i2f(i1), i2f(i2)) {
-        f1 / f2
+    let float = Ratio::from(i1.clone()).div(i2).to_f64().unwrap();
+
+    if float.is_infinite() {
+        Err(vm.new_exception_msg(
+            vm.ctx.exceptions.overflow_error.to_owned(),
+            "integer division result too large for a float".to_owned(),
+        ))
     } else {
-        let (quotient, mut rem) = i1.div_rem(i2);
-        let mut divisor = i2.clone();
-
-        if let Some(quotient) = i2f(&quotient) {
-            let rem_part = loop {
-                if rem.is_zero() {
-                    break 0.0;
-                } else if let (Some(rem), Some(divisor)) = (i2f(&rem), i2f(&divisor)) {
-                    break rem / divisor;
-                } else {
-                    // try with smaller numbers
-                    rem /= 2;
-                    divisor /= 2;
-                }
-            };
-
-            quotient + rem_part
-        } else {
-            return Err(vm.new_overflow_error("int too large to convert to float".to_owned()));
-        }
-    };
-    Ok(vm.ctx.new_float(value).into())
+        Ok(vm.ctx.new_float(float).into())
+    }
 }
 
 impl Constructor for PyInt {
@@ -244,8 +217,8 @@ impl Constructor for PyInt {
     fn py_new(cls: PyTypeRef, options: Self::Args, vm: &VirtualMachine) -> PyResult {
         let value = if let OptionalArg::Present(val) = options.val_options {
             if let OptionalArg::Present(base) = options.base {
-                let base = vm
-                    .to_index(&base)?
+                let base = base
+                    .try_index(vm)?
                     .as_bigint()
                     .to_u32()
                     .filter(|&v| v == 0 || (2..=36).contains(&v))
@@ -265,9 +238,7 @@ impl Constructor for PyInt {
                     val
                 };
 
-                PyNumber::new(val.as_ref(), vm)
-                    .int(vm)
-                    .map(|x| x.as_bigint().clone())
+                val.try_int(vm).map(|x| x.as_bigint().clone())
             }
         } else if let OptionalArg::Present(_) = options.base {
             Err(vm.new_type_error("int() missing string argument".to_owned()))
@@ -350,7 +321,7 @@ impl PyInt {
     }
 }
 
-#[pyimpl(flags(BASETYPE), with(Comparable, Hashable, Constructor, AsNumber))]
+#[pyclass(flags(BASETYPE), with(Comparable, Hashable, Constructor, AsNumber))]
 impl PyInt {
     #[pymethod(name = "__radd__")]
     #[pymethod(magic)]
@@ -701,22 +672,22 @@ impl PyInt {
         vm.ctx.new_bigint(&zelf.value)
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn real(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyRef<Self> {
         Self::clone_if_subclass(zelf, vm)
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn imag(&self) -> usize {
         0
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn numerator(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyRef<Self> {
         Self::clone_if_subclass(zelf, vm)
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn denominator(&self) -> usize {
         1
     }
@@ -756,37 +727,76 @@ impl Hashable for PyInt {
 }
 
 impl AsNumber for PyInt {
-    const AS_NUMBER: PyNumberMethods = PyNumberMethods {
-        add: Some(|number, other, vm| Self::number_int_op(number, other, |a, b| a + b, vm)),
-        subtract: Some(|number, other, vm| Self::number_int_op(number, other, |a, b| a - b, vm)),
-        multiply: Some(|number, other, vm| Self::number_int_op(number, other, |a, b| a * b, vm)),
-        remainder: Some(|number, other, vm| Self::number_general_op(number, other, inner_mod, vm)),
-        divmod: Some(|number, other, vm| Self::number_general_op(number, other, inner_divmod, vm)),
-        power: Some(|number, other, vm| Self::number_general_op(number, other, inner_pow, vm)),
-        negative: Some(|number, vm| (&Self::number_downcast(number).value).neg().to_pyresult(vm)),
-        positive: Some(|number, vm| Ok(Self::number_int(number, vm).into())),
-        absolute: Some(|number, vm| Self::number_downcast(number).value.abs().to_pyresult(vm)),
-        boolean: Some(|number, _vm| Ok(Self::number_downcast(number).value.is_zero())),
-        invert: Some(|number, vm| (&Self::number_downcast(number).value).not().to_pyresult(vm)),
-        lshift: Some(|number, other, vm| Self::number_general_op(number, other, inner_lshift, vm)),
-        rshift: Some(|number, other, vm| Self::number_general_op(number, other, inner_rshift, vm)),
-        and: Some(|number, other, vm| Self::number_int_op(number, other, |a, b| a & b, vm)),
-        xor: Some(|number, other, vm| Self::number_int_op(number, other, |a, b| a ^ b, vm)),
-        or: Some(|number, other, vm| Self::number_int_op(number, other, |a, b| a | b, vm)),
-        int: Some(|number, other| Ok(Self::number_int(number, other))),
-        float: Some(|number, vm| {
-            let zelf = Self::number_downcast(number);
-            try_to_float(&zelf.value, vm).map(|x| vm.ctx.new_float(x))
-        }),
-        floor_divide: Some(|number, other, vm| {
-            Self::number_general_op(number, other, inner_floordiv, vm)
-        }),
-        true_divide: Some(|number, other, vm| {
-            Self::number_general_op(number, other, inner_truediv, vm)
-        }),
-        index: Some(|number, vm| Ok(Self::number_int(number, vm))),
-        ..PyNumberMethods::NOT_IMPLEMENTED
-    };
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            add: atomic_func!(|num, other, vm| PyInt::number_int_op(num, other, |a, b| a + b, vm)),
+            subtract: atomic_func!(|num, other, vm| PyInt::number_int_op(
+                num,
+                other,
+                |a, b| a - b,
+                vm
+            )),
+            multiply: atomic_func!(|num, other, vm| PyInt::number_int_op(
+                num,
+                other,
+                |a, b| a * b,
+                vm
+            )),
+            remainder: atomic_func!(|num, other, vm| PyInt::number_general_op(
+                num, other, inner_mod, vm
+            )),
+            divmod: atomic_func!(|num, other, vm| PyInt::number_general_op(
+                num,
+                other,
+                inner_divmod,
+                vm
+            )),
+            power: atomic_func!(|num, other, vm| PyInt::number_general_op(
+                num, other, inner_pow, vm
+            )),
+            negative: atomic_func!(|num, vm| (&PyInt::number_downcast(num).value)
+                .neg()
+                .to_pyresult(vm)),
+            positive: atomic_func!(|num, vm| Ok(PyInt::number_int(num, vm).into())),
+            absolute: atomic_func!(|num, vm| PyInt::number_downcast(num)
+                .value
+                .abs()
+                .to_pyresult(vm)),
+            boolean: atomic_func!(|num, _vm| Ok(PyInt::number_downcast(num).value.is_zero())),
+            invert: atomic_func!(|num, vm| (&PyInt::number_downcast(num).value)
+                .not()
+                .to_pyresult(vm)),
+            lshift: atomic_func!(|num, other, vm| PyInt::number_general_op(
+                num,
+                other,
+                inner_lshift,
+                vm
+            )),
+            rshift: atomic_func!(|num, other, vm| PyInt::number_general_op(
+                num,
+                other,
+                inner_rshift,
+                vm
+            )),
+            and: atomic_func!(|num, other, vm| PyInt::number_int_op(num, other, |a, b| a & b, vm)),
+            xor: atomic_func!(|num, other, vm| PyInt::number_int_op(num, other, |a, b| a ^ b, vm)),
+            or: atomic_func!(|num, other, vm| PyInt::number_int_op(num, other, |a, b| a | b, vm)),
+            int: atomic_func!(|num, other| Ok(PyInt::number_int(num, other))),
+            float: atomic_func!(|num, vm| {
+                let zelf = PyInt::number_downcast(num);
+                try_to_float(&zelf.value, vm).map(|x| vm.ctx.new_float(x))
+            }),
+            floor_divide: atomic_func!(|num, other, vm| {
+                PyInt::number_general_op(num, other, inner_floordiv, vm)
+            }),
+            true_divide: atomic_func!(|num, other, vm| {
+                PyInt::number_general_op(num, other, inner_truediv, vm)
+            }),
+            index: atomic_func!(|num, vm| Ok(PyInt::number_int(num, vm))),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
+    }
 }
 
 impl PyInt {

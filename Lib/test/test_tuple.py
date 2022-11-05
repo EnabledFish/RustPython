@@ -1,7 +1,7 @@
 from test import support, seq_tests
 import unittest
 
-# import gc
+import gc
 import pickle
 
 # For tuple hashes, we normally only run a test to ensure that we get
@@ -18,8 +18,6 @@ JUST_SHOW_HASH_RESULTS = False # if RUN_ALL_HASH_TESTS, just display
 class TupleTest(seq_tests.CommonTest):
     type2test = tuple
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_getitem_error(self):
         t = ()
         msg = "tuple indices must be integers or slices"

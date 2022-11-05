@@ -41,10 +41,12 @@ pub(crate) mod macros;
 mod anystr;
 pub mod buffer;
 pub mod builtins;
+pub mod byte;
 mod bytesinner;
 pub mod cformat;
 pub mod class;
 mod codecs;
+pub mod compiler;
 pub mod convert;
 mod coroutine;
 mod dictdatatype;
@@ -57,6 +59,7 @@ mod frozen;
 pub mod function;
 pub mod import;
 mod intern;
+pub mod iter;
 pub mod object;
 pub mod prelude;
 pub mod protocol;
@@ -74,6 +77,7 @@ pub mod types;
 pub mod utils;
 pub mod version;
 pub mod vm;
+pub mod warn;
 
 pub use self::convert::{TryFromBorrowedObject, TryFromObject};
 pub use self::object::{
@@ -81,10 +85,8 @@ pub use self::object::{
 };
 pub use self::vm::{Context, Interpreter, Settings, VirtualMachine};
 
-pub use rustpython_bytecode as bytecode;
 pub use rustpython_common as common;
-#[cfg(feature = "rustpython-compiler")]
-pub use rustpython_compiler as compile;
+pub use rustpython_compiler_core as bytecode;
 
 #[doc(hidden)]
 pub mod __exports {

@@ -90,7 +90,7 @@ mod _js {
         }
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl PyJsValue {
         #[inline]
         pub fn new(value: impl Into<JsValue>) -> PyJsValue {
@@ -301,7 +301,7 @@ mod _js {
         }
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl JsClosure {
         fn new(obj: PyObjectRef, once: bool, vm: &VirtualMachine) -> PyResult<Self> {
             let wasm_vm = WASMVirtualMachine {
@@ -341,18 +341,18 @@ mod _js {
             })
         }
 
-        #[pyproperty]
+        #[pygetset]
         fn value(&self) -> Option<PyJsValueRef> {
             self.closure
                 .borrow()
                 .as_ref()
                 .map(|(_, jsval)| jsval.clone())
         }
-        #[pyproperty]
+        #[pygetset]
         fn destroyed(&self) -> bool {
             self.destroyed.get()
         }
-        #[pyproperty]
+        #[pygetset]
         fn detached(&self) -> bool {
             self.detached.get()
         }
@@ -396,7 +396,7 @@ mod _js {
         PyRejected(PyBaseExceptionRef),
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl PyPromise {
         pub fn new(value: Promise) -> PyPromise {
             PyPromise {
@@ -566,7 +566,7 @@ mod _js {
         }
     }
 
-    #[pyimpl(with(IterNext))]
+    #[pyclass(with(IterNext))]
     impl AwaitPromise {
         #[pymethod]
         fn send(&self, val: Option<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
@@ -619,7 +619,7 @@ mod _js {
     fn js_error(vm: &VirtualMachine) -> PyTypeRef {
         let ctx = &vm.ctx;
         let js_error = PyRef::leak(
-            PyType::new_simple_ref("JSError", &vm.ctx.exceptions.exception_type.to_owned())
+            PyType::new_simple_ref("JSError", &vm.ctx.exceptions.exception_type.to_owned(), ctx)
                 .unwrap(),
         );
         extend_class!(ctx, js_error, {

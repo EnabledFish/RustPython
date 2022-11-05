@@ -3,6 +3,7 @@ use super::{
 };
 use crate::{
     anystr::{self, AnyStr},
+    atomic_func,
     bytesinner::{
         bytes_decode, ByteInnerFindOptions, ByteInnerNewOptions, ByteInnerPaddingOptions,
         ByteInnerSplitOptions, ByteInnerTranslateOptions, DecodeArgs, PyBytesInner,
@@ -13,13 +14,13 @@ use crate::{
     function::Either,
     function::{ArgBytesLike, ArgIterable, OptionalArg, OptionalOption, PyComparisonValue},
     protocol::{
-        BufferDescriptor, BufferMethods, PyBuffer, PyIterReturn, PyMappingMethods,
+        BufferDescriptor, BufferMethods, PyBuffer, PyIterReturn, PyMappingMethods, PyNumberMethods,
         PySequenceMethods,
     },
     sliceable::{SequenceIndex, SliceableSequenceOp},
     types::{
-        AsBuffer, AsMapping, AsSequence, Callable, Comparable, Constructor, Hashable, IterNext,
-        IterNextIterable, Iterable, PyComparisonOp, Unconstructible,
+        AsBuffer, AsMapping, AsNumber, AsSequence, Callable, Comparable, Constructor, Hashable,
+        IterNext, IterNextIterable, Iterable, PyComparisonOp, Unconstructible,
     },
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
     TryFromBorrowedObject, TryFromObject, VirtualMachine,
@@ -99,7 +100,7 @@ impl PyBytes {
     }
 }
 
-#[pyimpl(
+#[pyclass(
     flags(BASETYPE),
     with(
         AsMapping,
@@ -108,7 +109,8 @@ impl PyBytes {
         Comparable,
         AsBuffer,
         Iterable,
-        Constructor
+        Constructor,
+        AsNumber
     )
 )]
 impl PyBytes {
@@ -149,7 +151,7 @@ impl PyBytes {
 
     #[pymethod(magic)]
     fn add(&self, other: ArgBytesLike) -> Vec<u8> {
-        self.inner.add(&*other.borrow_buf())
+        self.inner.add(&other.borrow_buf())
     }
 
     #[pymethod(magic)]
@@ -167,16 +169,16 @@ impl PyBytes {
     }
 
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult {
-        match SequenceIndex::try_from_borrowed_object(vm, needle)? {
+        match SequenceIndex::try_from_borrowed_object(vm, needle, "byte")? {
             SequenceIndex::Int(i) => self
                 .inner
                 .elements
-                .get_item_by_index(vm, i)
+                .getitem_by_index(vm, i)
                 .map(|x| vm.ctx.new_int(x).into()),
             SequenceIndex::Slice(slice) => self
                 .inner
                 .elements
-                .get_item_by_slice(vm, slice)
+                .getitem_by_slice(vm, slice)
                 .map(|x| vm.ctx.new_bytes(x).into()),
         }
     }
@@ -543,7 +545,7 @@ impl PyBytes {
     ) -> (PyTypeRef, PyTupleRef, Option<PyDictRef>) {
         let bytes = PyBytes::from(zelf.inner.elements.clone()).to_pyobject(vm);
         (
-            zelf.class().clone(),
+            zelf.class().to_owned(),
             PyTuple::new_ref(vec![bytes], &vm.ctx),
             zelf.as_object().dict(),
         )
@@ -569,41 +571,64 @@ impl AsBuffer for PyBytes {
 }
 
 impl AsMapping for PyBytes {
-    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-        length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
-        subscript: Some(|mapping, needle, vm| Self::mapping_downcast(mapping)._getitem(needle, vm)),
-        ass_subscript: None,
-    };
+    fn as_mapping() -> &'static PyMappingMethods {
+        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+            length: atomic_func!(|mapping, _vm| Ok(PyBytes::mapping_downcast(mapping).len())),
+            subscript: atomic_func!(
+                |mapping, needle, vm| PyBytes::mapping_downcast(mapping)._getitem(needle, vm)
+            ),
+            ..PyMappingMethods::NOT_IMPLEMENTED
+        };
+        &AS_MAPPING
+    }
 }
 
 impl AsSequence for PyBytes {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
-        concat: Some(|seq, other, vm| {
-            Self::sequence_downcast(seq)
-                .inner
-                .concat(other, vm)
-                .map(|x| vm.ctx.new_bytes(x).into())
-        }),
-        repeat: Some(|seq, n, vm| {
-            Ok(vm
-                .ctx
-                .new_bytes(Self::sequence_downcast(seq).repeat(n))
-                .into())
-        }),
-        item: Some(|seq, i, vm| {
-            Self::sequence_downcast(seq)
-                .inner
-                .elements
-                .get_item_by_index(vm, i)
-                .map(|x| vm.ctx.new_bytes(vec![x]).into())
-        }),
-        contains: Some(|seq, other, vm| {
-            let other = <Either<PyBytesInner, PyIntRef>>::try_from_object(vm, other.to_owned())?;
-            Self::sequence_downcast(seq).contains(other, vm)
-        }),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+            length: atomic_func!(|seq, _vm| Ok(PyBytes::sequence_downcast(seq).len())),
+            concat: atomic_func!(|seq, other, vm| {
+                PyBytes::sequence_downcast(seq)
+                    .inner
+                    .concat(other, vm)
+                    .map(|x| vm.ctx.new_bytes(x).into())
+            }),
+            repeat: atomic_func!(|seq, n, vm| {
+                Ok(vm
+                    .ctx
+                    .new_bytes(PyBytes::sequence_downcast(seq).repeat(n))
+                    .into())
+            }),
+            item: atomic_func!(|seq, i, vm| {
+                PyBytes::sequence_downcast(seq)
+                    .inner
+                    .elements
+                    .getitem_by_index(vm, i)
+                    .map(|x| vm.ctx.new_bytes(vec![x]).into())
+            }),
+            contains: atomic_func!(|seq, other, vm| {
+                let other =
+                    <Either<PyBytesInner, PyIntRef>>::try_from_object(vm, other.to_owned())?;
+                PyBytes::sequence_downcast(seq).contains(other, vm)
+            }),
+            ..PySequenceMethods::NOT_IMPLEMENTED
+        };
+        &AS_SEQUENCE
+    }
+}
+
+impl AsNumber for PyBytes {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            remainder: atomic_func!(|number, other, vm| {
+                PyBytes::number_downcast(number)
+                    .mod_(other.to_owned(), vm)
+                    .to_pyresult(vm)
+            }),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
+    }
 }
 
 impl Hashable for PyBytes {
@@ -659,7 +684,7 @@ impl PyPayload for PyBytesIterator {
     }
 }
 
-#[pyimpl(with(Constructor, IterNext))]
+#[pyclass(with(Constructor, IterNext))]
 impl PyBytesIterator {
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {

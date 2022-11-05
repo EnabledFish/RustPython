@@ -1,8 +1,9 @@
 use super::{
-    PyBytes, PyBytesRef, PyInt, PyListRef, PySlice, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType,
-    PyTypeRef,
+    PositionIterInternal, PyBytes, PyBytesRef, PyInt, PyListRef, PySlice, PyStr, PyStrRef, PyTuple,
+    PyTupleRef, PyType, PyTypeRef,
 };
 use crate::{
+    atomic_func,
     buffer::FormatSpec,
     bytesinner::bytes_to_hex,
     class::PyClassImpl,
@@ -15,15 +16,20 @@ use crate::{
     function::Either,
     function::{FuncArgs, OptionalArg, PyComparisonValue},
     protocol::{
-        BufferDescriptor, BufferMethods, PyBuffer, PyMappingMethods, PySequenceMethods, VecBuffer,
+        BufferDescriptor, BufferMethods, PyBuffer, PyIterReturn, PyMappingMethods,
+        PySequenceMethods, VecBuffer,
     },
-    sliceable::wrap_index,
-    types::{AsBuffer, AsMapping, AsSequence, Comparable, Constructor, Hashable, PyComparisonOp},
+    sliceable::SequenceIndexOp,
+    types::{
+        AsBuffer, AsMapping, AsSequence, Comparable, Constructor, Hashable, IterNext,
+        IterNextIterable, Iterable, PyComparisonOp, Unconstructible,
+    },
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
     TryFromBorrowedObject, TryFromObject, VirtualMachine,
 };
 use crossbeam_utils::atomic::AtomicCell;
 use itertools::Itertools;
+use rustpython_common::lock::PyMutex;
 use std::{cmp::Ordering, fmt::Debug, mem::ManuallyDrop, ops::Range};
 
 #[derive(FromArgs)]
@@ -36,7 +42,7 @@ pub struct PyMemoryViewNewArgs {
 pub struct PyMemoryView {
     // avoid double release when memoryview had released the buffer before drop
     buffer: ManuallyDrop<PyBuffer>,
-    // the released memoryview does not mean the buffer is destoryed
+    // the released memoryview does not mean the buffer is destroyed
     // because the possible another memeoryview is viewing from it
     released: AtomicCell<bool>,
     // start does NOT mean the bytes before start will not be visited,
@@ -61,13 +67,21 @@ impl Constructor for PyMemoryView {
     }
 }
 
-#[pyimpl(with(Hashable, Comparable, AsBuffer, AsMapping, AsSequence, Constructor))]
+#[pyclass(with(
+    Hashable,
+    Comparable,
+    AsBuffer,
+    AsMapping,
+    AsSequence,
+    Constructor,
+    Iterable
+))]
 impl PyMemoryView {
     fn parse_format(format: &str, vm: &VirtualMachine) -> PyResult<FormatSpec> {
         FormatSpec::parse(format.as_bytes(), vm)
     }
 
-    /// this should be the main entrence to create the memoryview
+    /// this should be the main entrance to create the memoryview
     /// to avoid the chained memoryview
     pub fn from_object(obj: &PyObject, vm: &VirtualMachine) -> PyResult<Self> {
         if let Some(other) = obj.payload::<Self>() {
@@ -78,7 +92,7 @@ impl PyMemoryView {
         }
     }
 
-    /// don't use this function to create the memeoryview if the buffer is exporting
+    /// don't use this function to create the memoryview if the buffer is exporting
     /// via another memoryview, use PyMemoryView::new_view() or PyMemoryView::from_object
     /// to reduce the chain
     pub fn from_buffer(buffer: PyBuffer, vm: &VirtualMachine) -> PyResult<Self> {
@@ -113,7 +127,7 @@ impl PyMemoryView {
         Ok(zelf)
     }
 
-    /// this should be the only way to create a memroyview from another memoryview
+    /// this should be the only way to create a memoryview from another memoryview
     pub fn new_view(&self) -> Self {
         let zelf = PyMemoryView {
             buffer: self.buffer.clone(),
@@ -142,32 +156,32 @@ impl PyMemoryView {
         }
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn obj(&self, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         self.try_not_released(vm).map(|_| self.buffer.obj.clone())
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn nbytes(&self, vm: &VirtualMachine) -> PyResult<usize> {
         self.try_not_released(vm).map(|_| self.desc.len)
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn readonly(&self, vm: &VirtualMachine) -> PyResult<bool> {
         self.try_not_released(vm).map(|_| self.desc.readonly)
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn itemsize(&self, vm: &VirtualMachine) -> PyResult<usize> {
         self.try_not_released(vm).map(|_| self.desc.itemsize)
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn ndim(&self, vm: &VirtualMachine) -> PyResult<usize> {
         self.try_not_released(vm).map(|_| self.desc.ndim())
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn shape(&self, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
         self.try_not_released(vm)?;
         Ok(vm.ctx.new_tuple(
@@ -179,7 +193,7 @@ impl PyMemoryView {
         ))
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn strides(&self, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
         self.try_not_released(vm)?;
         Ok(vm.ctx.new_tuple(
@@ -191,7 +205,7 @@ impl PyMemoryView {
         ))
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn suboffsets(&self, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
         self.try_not_released(vm)?;
         Ok(vm.ctx.new_tuple(
@@ -203,23 +217,23 @@ impl PyMemoryView {
         ))
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn format(&self, vm: &VirtualMachine) -> PyResult<PyStr> {
         self.try_not_released(vm)
             .map(|_| PyStr::from(self.desc.format.clone()))
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn contiguous(&self, vm: &VirtualMachine) -> PyResult<bool> {
         self.try_not_released(vm).map(|_| self.desc.is_contiguous())
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn c_contiguous(&self, vm: &VirtualMachine) -> PyResult<bool> {
         self.try_not_released(vm).map(|_| self.desc.is_contiguous())
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn f_contiguous(&self, vm: &VirtualMachine) -> PyResult<bool> {
         // TODO: fortain order
         self.try_not_released(vm)
@@ -243,7 +257,8 @@ impl PyMemoryView {
             ));
         }
         let (shape, stride, suboffset) = self.desc.dim_desc[0];
-        let index = wrap_index(i, shape)
+        let index = i
+            .wrapped_at(shape)
             .ok_or_else(|| vm.new_index_error("index out of range".to_owned()))?;
         let index = index as isize * stride + suboffset;
         let pos = (index + self.start as isize) as usize;
@@ -292,7 +307,8 @@ impl PyMemoryView {
             return Err(vm.new_not_implemented_error("sub-views are not implemented".to_owned()));
         }
         let (shape, stride, suboffset) = self.desc.dim_desc[0];
-        let index = wrap_index(i, shape)
+        let index = i
+            .wrapped_at(shape)
             .ok_or_else(|| vm.new_index_error("index out of range".to_owned()))?;
         let index = index as isize * stride + suboffset;
         let pos = (index + self.start as isize) as usize;
@@ -316,7 +332,7 @@ impl PyMemoryView {
         if zelf.is(&src) {
             return if !is_equiv_structure(&zelf.desc, &dest.desc) {
                 Err(vm.new_value_error(
-                    "memoryview assigment: lvalue and rvalue have different structures".to_owned(),
+                    "memoryview assignment: lvalue and rvalue have different structures".to_owned(),
                 ))
             } else {
                 // assign self[:] to self
@@ -336,7 +352,7 @@ impl PyMemoryView {
 
         if !is_equiv_structure(&src.desc, &dest.desc) {
             return Err(vm.new_value_error(
-                "memoryview assigment: lvalue and rvalue have different structures".to_owned(),
+                "memoryview assignment: lvalue and rvalue have different structures".to_owned(),
             ));
         }
 
@@ -479,7 +495,7 @@ impl PyMemoryView {
     fn init_slice(&mut self, slice: &PySlice, dim: usize, vm: &VirtualMachine) -> PyResult<()> {
         let (shape, stride, _) = self.desc.dim_desc[dim];
         let slice = slice.to_saturated(vm)?;
-        let (range, step, slicelen) = slice.adjust_indices(shape);
+        let (range, step, slice_len) = slice.adjust_indices(shape);
 
         let mut is_adjusted_suboffset = false;
         for (_, _, suboffset) in self.desc.dim_desc.iter_mut().rev() {
@@ -498,7 +514,7 @@ impl PyMemoryView {
                     range.start
                 };
         }
-        self.desc.dim_desc[dim].0 = slicelen;
+        self.desc.dim_desc[dim].0 = slice_len;
         self.desc.dim_desc[dim].1 *= step;
 
         Ok(())
@@ -902,7 +918,7 @@ impl TryFromObject for SubscriptNeedle {
             Ok(Self::Index(i.try_to_primitive(vm)?))
         } else if obj.payload_is::<PySlice>() {
             Ok(Self::Slice(unsafe { obj.downcast_unchecked::<PySlice>() }))
-        } else if let Ok(i) = vm.to_index(&obj) {
+        } else if let Ok(i) = obj.try_index(vm) {
             Ok(Self::Index(i.try_to_primitive(vm)?))
         } else {
             if let Some(tuple) = obj.payload::<PyTuple>() {
@@ -958,37 +974,43 @@ impl Drop for PyMemoryView {
 }
 
 impl AsMapping for PyMemoryView {
-    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-        length: Some(|mapping, vm| Self::mapping_downcast(mapping).len(vm)),
-        subscript: Some(|mapping, needle, vm| {
-            let zelf = Self::mapping_downcast(mapping);
-            Self::getitem(zelf.to_owned(), needle.to_owned(), vm)
-        }),
-        ass_subscript: Some(|mapping, needle, value, vm| {
-            let zelf = Self::mapping_downcast(mapping);
-            if let Some(value) = value {
-                Self::setitem(zelf.to_owned(), needle.to_owned(), value, vm)
-            } else {
-                Err(vm.new_type_error("cannot delete memory".to_owned()))
-            }
-        }),
-    };
+    fn as_mapping() -> &'static PyMappingMethods {
+        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+            length: atomic_func!(|mapping, vm| PyMemoryView::mapping_downcast(mapping).len(vm)),
+            subscript: atomic_func!(|mapping, needle, vm| {
+                let zelf = PyMemoryView::mapping_downcast(mapping);
+                PyMemoryView::getitem(zelf.to_owned(), needle.to_owned(), vm)
+            }),
+            ass_subscript: atomic_func!(|mapping, needle, value, vm| {
+                let zelf = PyMemoryView::mapping_downcast(mapping);
+                if let Some(value) = value {
+                    PyMemoryView::setitem(zelf.to_owned(), needle.to_owned(), value, vm)
+                } else {
+                    Err(vm.new_type_error("cannot delete memory".to_owned()))
+                }
+            }),
+        };
+        &AS_MAPPING
+    }
 }
 
 impl AsSequence for PyMemoryView {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            zelf.try_not_released(vm)?;
-            zelf.len(vm)
-        }),
-        item: Some(|seq, i, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            zelf.try_not_released(vm)?;
-            zelf.getitem_by_idx(i, vm)
-        }),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+            length: atomic_func!(|seq, vm| {
+                let zelf = PyMemoryView::sequence_downcast(seq);
+                zelf.try_not_released(vm)?;
+                zelf.len(vm)
+            }),
+            item: atomic_func!(|seq, i, vm| {
+                let zelf = PyMemoryView::sequence_downcast(seq);
+                zelf.try_not_released(vm)?;
+                zelf.getitem_by_idx(i, vm)
+            }),
+            ..PySequenceMethods::NOT_IMPLEMENTED
+        };
+        &AS_SEQUENCE
+    }
 }
 
 impl Comparable for PyMemoryView {
@@ -1036,7 +1058,8 @@ impl PyPayload for PyMemoryView {
 }
 
 pub(crate) fn init(ctx: &Context) {
-    PyMemoryView::extend_class(ctx, ctx.types.memoryview_type)
+    PyMemoryView::extend_class(ctx, ctx.types.memoryview_type);
+    PyMemoryViewIterator::extend_class(ctx, ctx.types.memoryviewiterator_type);
 }
 
 fn format_unpack(
@@ -1079,4 +1102,50 @@ fn is_equiv_format(a: &BufferDescriptor, b: &BufferDescriptor) -> bool {
 
 fn is_equiv_structure(a: &BufferDescriptor, b: &BufferDescriptor) -> bool {
     is_equiv_format(a, b) && is_equiv_shape(a, b)
+}
+
+impl Iterable for PyMemoryView {
+    fn iter(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        Ok(PyMemoryViewIterator {
+            internal: PyMutex::new(PositionIterInternal::new(zelf, 0)),
+        }
+        .into_pyobject(vm))
+    }
+}
+
+#[pyclass(module = false, name = "memory_iterator")]
+#[derive(Debug)]
+pub struct PyMemoryViewIterator {
+    internal: PyMutex<PositionIterInternal<PyRef<PyMemoryView>>>,
+}
+
+impl PyPayload for PyMemoryViewIterator {
+    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+        vm.ctx.types.memoryviewiterator_type
+    }
+}
+
+#[pyclass(with(Constructor, IterNext))]
+impl PyMemoryViewIterator {
+    #[pymethod(magic)]
+    fn reduce(&self, vm: &VirtualMachine) -> PyTupleRef {
+        self.internal
+            .lock()
+            .builtins_iter_reduce(|x| x.clone().into(), vm)
+    }
+}
+impl Unconstructible for PyMemoryViewIterator {}
+
+impl IterNextIterable for PyMemoryViewIterator {}
+impl IterNext for PyMemoryViewIterator {
+    fn next(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+        zelf.internal.lock().next(|mv, pos| {
+            let len = mv.len(vm)?;
+            Ok(if pos >= len {
+                PyIterReturn::StopIteration(None)
+            } else {
+                PyIterReturn::Return(mv.getitem_by_idx(pos.try_into().unwrap(), vm)?)
+            })
+        })
+    }
 }

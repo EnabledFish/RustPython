@@ -26,7 +26,7 @@ mod _ssl {
     use crate::{
         common::{
             ascii,
-            lock::{PyRwLock, PyRwLockWriteGuard},
+            lock::{PyMutex, PyRwLock, PyRwLockWriteGuard},
         },
         socket::{self, PySocket},
         vm::{
@@ -228,7 +228,7 @@ mod _ssl {
     /// SSL/TLS connection terminated abruptly.
     #[pyattr(name = "SSLEOFError", once)]
     fn ssl_eof_error(vm: &VirtualMachine) -> PyTypeRef {
-        PyType::new_simple_ref("ssl.SSLEOFError", &ssl_error(vm)).unwrap()
+        PyType::new_simple_ref("ssl.SSLEOFError", &ssl_error(vm), &vm.ctx).unwrap()
     }
 
     type OpensslVersionInfo = (u8, u8, u8, u8, u8);
@@ -423,6 +423,7 @@ mod _ssl {
         ctx: PyRwLock<SslContextBuilder>,
         check_hostname: AtomicCell<bool>,
         protocol: SslVersion,
+        post_handshake_auth: PyMutex<bool>,
     }
 
     impl fmt::Debug for PySslContext {
@@ -491,13 +492,14 @@ mod _ssl {
                 ctx: PyRwLock::new(builder),
                 check_hostname: AtomicCell::new(check_hostname),
                 protocol: proto,
+                post_handshake_auth: PyMutex::new(false),
             }
             .into_ref_with_type(vm, cls)
             .map(Into::into)
         }
     }
 
-    #[pyimpl(flags(BASETYPE), with(Constructor))]
+    #[pyclass(flags(BASETYPE), with(Constructor))]
     impl PySslContext {
         fn builder(&self) -> PyRwLockWriteGuard<'_, SslContextBuilder> {
             self.ctx.write()
@@ -508,6 +510,22 @@ mod _ssl {
         {
             let c = self.ctx.read();
             func(builder_as_ctx(&c))
+        }
+
+        #[pygetset]
+        fn post_handshake_auth(&self) -> bool {
+            *self.post_handshake_auth.lock()
+        }
+        #[pygetset(setter)]
+        fn set_post_handshake_auth(
+            &self,
+            value: Option<PyObjectRef>,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            let value = value
+                .ok_or_else(|| vm.new_attribute_error("cannot delete attribute".to_owned()))?;
+            *self.post_handshake_auth.lock() = value.is_true(vm)?;
+            Ok(())
         }
 
         #[pymethod]
@@ -521,20 +539,20 @@ mod _ssl {
             })
         }
 
-        #[pyproperty]
+        #[pygetset]
         fn options(&self) -> libc::c_ulong {
             self.ctx.read().options().bits()
         }
-        #[pyproperty(setter)]
+        #[pygetset(setter)]
         fn set_options(&self, opts: libc::c_ulong) {
             self.builder()
                 .set_options(SslOptions::from_bits_truncate(opts));
         }
-        #[pyproperty]
+        #[pygetset]
         fn protocol(&self) -> i32 {
             self.protocol as i32
         }
-        #[pyproperty]
+        #[pygetset]
         fn verify_mode(&self) -> i32 {
             let mode = self.exec_ctx(|ctx| ctx.verify_mode());
             if mode == SslVerifyMode::NONE {
@@ -547,7 +565,7 @@ mod _ssl {
                 unreachable!()
             }
         }
-        #[pyproperty(setter)]
+        #[pygetset(setter)]
         fn set_verify_mode(&self, cert: i32, vm: &VirtualMachine) -> PyResult<()> {
             let mut ctx = self.builder();
             let cert_req = CertRequirements::try_from(cert)
@@ -568,11 +586,11 @@ mod _ssl {
             ctx.set_verify(mode);
             Ok(())
         }
-        #[pyproperty]
+        #[pygetset]
         fn check_hostname(&self) -> bool {
             self.check_hostname.load()
         }
-        #[pyproperty(setter)]
+        #[pygetset(setter)]
         fn set_check_hostname(&self, ch: bool) {
             let mut ctx = self.builder();
             if ch && builder_as_ctx(&ctx).verify_mode() == SslVerifyMode::NONE {
@@ -903,28 +921,28 @@ mod _ssl {
         }
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl PySslSocket {
-        #[pyproperty]
+        #[pygetset]
         fn owner(&self) -> Option<PyObjectRef> {
             self.owner.read().as_ref().and_then(|weak| weak.upgrade())
         }
-        #[pyproperty(setter)]
+        #[pygetset(setter)]
         fn set_owner(&self, owner: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             let mut lock = self.owner.write();
             lock.take();
             *lock = Some(owner.downgrade(None, vm)?);
             Ok(())
         }
-        #[pyproperty]
+        #[pygetset]
         fn server_side(&self) -> bool {
             self.socket_type == SslServerOrClient::Server
         }
-        #[pyproperty]
+        #[pygetset]
         fn context(&self) -> PyRef<PySslContext> {
             self.ctx.clone()
         }
-        #[pyproperty]
+        #[pygetset]
         fn server_hostname(&self) -> Option<PyStrRef> {
             self.server_hostname.clone()
         }
@@ -1132,10 +1150,17 @@ mod _ssl {
                 // TODO: map the error codes to code names, e.g. "CERTIFICATE_VERIFY_FAILED", just requires a big hashmap/dict
                 let errstr = e.reason().unwrap_or("unknown error");
                 let msg = if let Some(lib) = e.library() {
+                    // add `library` attribute
+                    let attr_name = vm.ctx.as_ref().intern_str("library");
+                    cls.set_attr(attr_name, vm.ctx.new_str(lib).into());
                     format!("[{}] {} ({}:{})", lib, errstr, file, line)
                 } else {
                     format!("{} ({}:{})", errstr, file, line)
                 };
+                // add `reason` attribute
+                let attr_name = vm.ctx.as_ref().intern_str("reason");
+                cls.set_attr(attr_name, vm.ctx.new_str(errstr).into());
+
                 let reason = sys::ERR_GET_REASON(e.code());
                 vm.new_exception(
                     cls,
@@ -1420,7 +1445,7 @@ mod windows {
             .iter()
             .filter_map(|open| open(store_name.as_str()).ok())
             .collect::<Vec<_>>();
-        let certs = stores.iter().map(|s| s.certs()).flatten().map(|c| {
+        let certs = stores.iter().flat_map(|s| s.certs()).map(|c| {
             let cert = vm.ctx.new_bytes(c.to_der().to_owned());
             let enc_type = unsafe {
                 let ptr = c.as_ptr() as wincrypt::PCCERT_CONTEXT;

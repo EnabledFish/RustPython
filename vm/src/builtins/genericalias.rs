@@ -1,4 +1,6 @@
+use super::type_;
 use crate::{
+    atomic_func,
     builtins::{PyList, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef},
     class::PyClassImpl,
     common::hash,
@@ -55,7 +57,7 @@ impl Constructor for PyGenericAlias {
     }
 }
 
-#[pyimpl(
+#[pyclass(
     with(AsMapping, Callable, Comparable, Constructor, GetAttr, Hashable),
     flags(BASETYPE)
 )]
@@ -122,17 +124,17 @@ impl PyGenericAlias {
         ))
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn parameters(&self) -> PyObjectRef {
         self.parameters.clone().into()
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn args(&self) -> PyObjectRef {
         self.args.clone().into()
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn origin(&self) -> PyObjectRef {
         self.origin.clone().into()
     }
@@ -187,6 +189,16 @@ impl PyGenericAlias {
     fn subclasscheck(_zelf: PyRef<Self>, _obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         Err(vm
             .new_type_error("issubclass() argument 2 cannot be a parameterized generic".to_owned()))
+    }
+
+    #[pymethod(magic)]
+    fn ror(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
+        type_::or_(other, zelf, vm)
+    }
+
+    #[pymethod(magic)]
+    fn or(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
+        type_::or_(zelf, other, vm)
     }
 }
 
@@ -307,13 +319,15 @@ pub fn subs_parameters<F: Fn(&VirtualMachine) -> PyResult<String>>(
 }
 
 impl AsMapping for PyGenericAlias {
-    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-        length: None,
-        subscript: Some(|mapping, needle, vm| {
-            Self::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
-        }),
-        ass_subscript: None,
-    };
+    fn as_mapping() -> &'static PyMappingMethods {
+        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+            subscript: atomic_func!(|mapping, needle, vm| {
+                PyGenericAlias::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
+            }),
+            ..PyMappingMethods::NOT_IMPLEMENTED
+        };
+        &AS_MAPPING
+    }
 }
 
 impl Callable for PyGenericAlias {

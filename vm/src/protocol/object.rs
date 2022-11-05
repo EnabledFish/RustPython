@@ -10,8 +10,7 @@ use crate::{
     common::{hash::PyHash, str::to_ascii},
     convert::{ToPyObject, ToPyResult},
     dictdatatype::DictKey,
-    function::Either,
-    function::{OptionalArg, PyArithmeticValue},
+    function::{Either, OptionalArg, PyArithmeticValue, PySetterValue},
     protocol::{PyIter, PyMapping, PySequence},
     types::{Constructor, PyComparisonOp},
     AsObject, PyObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine,
@@ -89,7 +88,7 @@ impl PyObject {
     #[cfg_attr(feature = "flame-it", flame("PyObjectRef"))]
     #[inline]
     fn _get_attr(&self, attr_name: PyStrRef, vm: &VirtualMachine) -> PyResult {
-        vm_trace!("object.__getattribute__: {:?} {:?}", obj, attr_name);
+        vm_trace!("object.__getattribute__: {:?} {:?}", self, attr_name);
         let getattro = self
             .class()
             .mro_find_map(|cls| cls.slots.getattro.load())
@@ -104,19 +103,22 @@ impl PyObject {
         &self,
         vm: &VirtualMachine,
         attr_name: PyStrRef,
-        attr_value: Option<PyObjectRef>,
+        attr_value: PySetterValue,
     ) -> PyResult<()> {
         let setattro = {
             let cls = self.class();
             cls.mro_find_map(|cls| cls.slots.setattro.load())
                 .ok_or_else(|| {
-                    let assign = attr_value.is_some();
                     let has_getattr = cls.mro_find_map(|cls| cls.slots.getattro.load()).is_some();
                     vm.new_type_error(format!(
                         "'{}' object has {} attributes ({} {})",
                         cls.name(),
                         if has_getattr { "only read-only" } else { "no" },
-                        if assign { "assign to" } else { "del" },
+                        if attr_value.is_assign() {
+                            "assign to"
+                        } else {
+                            "del"
+                        },
                         attr_name
                     ))
                 })?
@@ -131,7 +133,7 @@ impl PyObject {
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         let attr_name = attr_name.into_pystr_ref(vm);
-        self.call_set_attr(vm, attr_name, Some(attr_value.into()))
+        self.call_set_attr(vm, attr_name, PySetterValue::Assign(attr_value.into()))
     }
 
     // int PyObject_GenericSetAttr(PyObject *o, PyObject *name, PyObject *value)
@@ -139,10 +141,10 @@ impl PyObject {
     pub fn generic_setattr(
         &self,
         attr_name: PyStrRef, // TODO: Py<PyStr>
-        value: Option<PyObjectRef>,
+        value: PySetterValue,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        vm_trace!("object.__setattr__({:?}, {}, {:?})", obj, attr_name, value);
+        vm_trace!("object.__setattr__({:?}, {}, {:?})", self, attr_name, value);
         if let Some(attr) = vm
             .ctx
             .interned_str(&*attr_name)
@@ -155,7 +157,7 @@ impl PyObject {
         }
 
         if let Some(dict) = self.dict() {
-            if let Some(value) = value {
+            if let PySetterValue::Assign(value) = value {
                 dict.set_item(&*attr_name, value, vm)?;
             } else {
                 dict.del_item(&*attr_name, vm).map_err(|e| {
@@ -182,7 +184,13 @@ impl PyObject {
 
     pub fn generic_getattr(&self, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
         self.generic_getattr_opt(name.clone(), None, vm)?
-            .ok_or_else(|| vm.new_attribute_error(format!("{} has no attribute '{}'", self, name)))
+            .ok_or_else(|| {
+                vm.new_attribute_error(format!(
+                    "'{}' object has no attribute '{}'",
+                    self.class().name(),
+                    name
+                ))
+            })
     }
 
     /// CPython _PyObject_GenericGetAttrWithDict
@@ -204,12 +212,10 @@ impl PyObject {
                         .mro_find_map(|cls| cls.slots.descr_set.load())
                         .is_some()
                     {
-                        drop(descr_cls);
-                        let cls = obj_cls.into_owned().into();
+                        let cls = obj_cls.to_owned().into();
                         return descr_get(descr, Some(self.to_owned()), Some(cls), vm).map(Some);
                     }
                 }
-                drop(descr_cls);
                 Some((descr, descr_get))
             }
             None => None,
@@ -228,7 +234,7 @@ impl PyObject {
         } else if let Some((attr, descr_get)) = cls_attr {
             match descr_get {
                 Some(descr_get) => {
-                    let cls = obj_cls.into_owned().into();
+                    let cls = obj_cls.to_owned().into();
                     descr_get(attr, Some(self.to_owned()), Some(cls), vm).map(Some)
                 }
                 None => Ok(Some(attr)),
@@ -240,7 +246,7 @@ impl PyObject {
 
     pub fn del_attr(&self, attr_name: impl IntoPyStrRef, vm: &VirtualMachine) -> PyResult<()> {
         let attr_name = attr_name.into_pystr_ref(vm);
-        self.call_set_attr(vm, attr_name, None)
+        self.call_set_attr(vm, attr_name, PySetterValue::Delete)
     }
 
     // Perform a comparison, raising TypeError when the requested comparison
@@ -270,7 +276,7 @@ impl PyObject {
         let is_strict_subclass = {
             let self_class = self.class();
             let other_class = other.class();
-            !self_class.is(&other_class) && other_class.fast_issubclass(&self_class)
+            !self_class.is(other_class) && other_class.fast_issubclass(self_class)
         };
         if is_strict_subclass {
             let res = vm.with_recursion("in comparison", || call_cmp(other, self, swapped))?;
@@ -374,8 +380,11 @@ impl PyObject {
                     continue;
                 }
                 _ => {
-                    for i in 0..n {
-                        if let Ok(true) = tuple.fast_getitem(i).abstract_issubclass(cls, vm) {
+                    if let Some(i) = (0..n).next() {
+                        let check = vm.with_recursion("in abstract_issubclass", || {
+                            tuple.fast_getitem(i).abstract_issubclass(cls, vm)
+                        })?;
+                        if check {
                             return Ok(true);
                         }
                     }
@@ -398,7 +407,7 @@ impl PyObject {
             })
             .and(self.check_cls(cls, vm, || {
                 format!(
-                    "issubclass() arg 2 must be a class or tuple of classes, not {}",
+                    "issubclass() arg 2 must be a class, a tuple of classes, or a union, not {}",
                     cls.class()
                 )
             }))
@@ -445,7 +454,7 @@ impl PyObject {
                 vm,
                 self.to_owned().get_attr(identifier!(vm, __class__), vm)?,
             ) {
-                if icls.is(&self.class()) {
+                if icls.is(self.class()) {
                     Ok(false)
                 } else {
                     Ok(icls.fast_issubclass(&typ))
@@ -506,10 +515,19 @@ impl PyObject {
     }
 
     pub fn hash(&self, vm: &VirtualMachine) -> PyResult<PyHash> {
+        let hash = self.get_class_attr(identifier!(vm, __hash__)).unwrap();
+        if vm.is_none(&hash) {
+            return Err(vm.new_exception_msg(
+                vm.ctx.exceptions.type_error.to_owned(),
+                format!("unhashable type: '{}'", self.class().name()),
+            ));
+        }
+
         let hash = self
             .class()
             .mro_find_map(|cls| cls.slots.hash.load())
-            .unwrap(); // hash always exist
+            .unwrap();
+
         hash(self, vm)
     }
 
@@ -519,14 +537,18 @@ impl PyObject {
     // int PyObject_TypeCheck(PyObject *o, PyTypeObject *type)
 
     pub fn length_opt(&self, vm: &VirtualMachine) -> Option<PyResult<usize>> {
-        PySequence::new(self, vm)
-            .and_then(|seq| seq.length_opt(vm))
-            .or_else(|| PyMapping::new(self, vm).and_then(|mapping| mapping.length_opt(vm)))
+        self.to_sequence(vm)
+            .length_opt(vm)
+            .or_else(|| self.to_mapping().length_opt(vm))
     }
 
     pub fn length(&self, vm: &VirtualMachine) -> PyResult<usize> {
-        self.length_opt(vm)
-            .ok_or_else(|| vm.new_type_error(format!("object of type '{}' has no len()", &self)))?
+        self.length_opt(vm).ok_or_else(|| {
+            vm.new_type_error(format!(
+                "object of type '{}' has no len()",
+                self.class().name()
+            ))
+        })?
     }
 
     pub fn get_item<K: DictKey + ?Sized>(&self, needle: &K, vm: &VirtualMachine) -> PyResult {
@@ -544,7 +566,8 @@ impl PyObject {
         } else {
             if self.class().fast_issubclass(vm.ctx.types.type_type) {
                 if self.is(vm.ctx.types.type_type) {
-                    return PyGenericAlias::new(self.class().clone(), needle, vm).to_pyresult(vm);
+                    return PyGenericAlias::new(self.class().to_owned(), needle, vm)
+                        .to_pyresult(vm);
                 }
 
                 if let Some(class_getitem) =
@@ -567,17 +590,16 @@ impl PyObject {
             return dict.set_item(needle, value, vm);
         }
 
-        if let Some(mapping) = PyMapping::new(self, vm) {
-            if let Some(f) = mapping.methods.ass_subscript {
-                let needle = needle.to_pyobject(vm);
-                return f(&mapping, &needle, Some(value), vm);
-            }
+        let mapping = self.to_mapping();
+        if let Some(f) = mapping.methods.ass_subscript.load() {
+            let needle = needle.to_pyobject(vm);
+            return f(mapping, &needle, Some(value), vm);
         }
-        if let Some(seq) = PySequence::new(self, vm) {
-            if let Some(f) = seq.methods.ass_item {
-                let i = needle.key_as_isize(vm)?;
-                return f(&seq, i, Some(value), vm);
-            }
+
+        let seq = self.to_sequence(vm);
+        if let Some(f) = seq.methods.ass_item.load() {
+            let i = needle.key_as_isize(vm)?;
+            return f(seq, i, Some(value), vm);
         }
 
         Err(vm.new_type_error(format!(
@@ -591,17 +613,15 @@ impl PyObject {
             return dict.del_item(needle, vm);
         }
 
-        if let Some(mapping) = PyMapping::new(self, vm) {
-            if let Some(f) = mapping.methods.ass_subscript {
-                let needle = needle.to_pyobject(vm);
-                return f(&mapping, &needle, None, vm);
-            }
+        let mapping = self.to_mapping();
+        if let Some(f) = mapping.methods.ass_subscript.load() {
+            let needle = needle.to_pyobject(vm);
+            return f(mapping, &needle, None, vm);
         }
-        if let Some(seq) = PySequence::new(self, vm) {
-            if let Some(f) = seq.methods.ass_item {
-                let i = needle.key_as_isize(vm)?;
-                return f(&seq, i, None, vm);
-            }
+        let seq = self.to_sequence(vm);
+        if let Some(f) = seq.methods.ass_item.load() {
+            let i = needle.key_as_isize(vm)?;
+            return f(seq, i, None, vm);
         }
 
         Err(vm.new_type_error(format!("'{}' does not support item deletion", self.class())))

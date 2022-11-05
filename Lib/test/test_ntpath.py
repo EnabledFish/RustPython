@@ -271,6 +271,17 @@ class TestNtpath(NtpathTestCase):
 
     @os_helper.skip_unless_symlink
     @unittest.skipUnless(HAVE_GETFINALPATHNAME, 'need _getfinalpathname')
+    def test_realpath_strict(self):
+        # Bug #43757: raise FileNotFoundError in strict mode if we encounter
+        # a path that does not exist.
+        ABSTFN = ntpath.abspath(os_helper.TESTFN)
+        os.symlink(ABSTFN + "1", ABSTFN)
+        self.addCleanup(os_helper.unlink, ABSTFN)
+        self.assertRaises(FileNotFoundError, ntpath.realpath, ABSTFN, strict=True)
+        self.assertRaises(FileNotFoundError, ntpath.realpath, ABSTFN + "2", strict=True)
+
+    @os_helper.skip_unless_symlink
+    @unittest.skipUnless(HAVE_GETFINALPATHNAME, 'need _getfinalpathname')
     def test_realpath_relative(self):
         ABSTFN = ntpath.abspath(os_helper.TESTFN)
         open(ABSTFN, "wb").close()
@@ -339,12 +350,12 @@ class TestNtpath(NtpathTestCase):
             self.assertPathEqual(ntpath.realpath(b"broken5"),
                                  os.fsencode(ABSTFN + r"\missing"))
 
-    @unittest.skip("TODO: RUSTPYTHON, leaves behind TESTFN")
     @os_helper.skip_unless_symlink
     @unittest.skipUnless(HAVE_GETFINALPATHNAME, 'need _getfinalpathname')
     def test_realpath_symlink_loops(self):
-        # Symlink loops are non-deterministic as to which path is returned, but
-        # it will always be the fully resolved path of one member of the cycle
+        # Symlink loops in non-strict mode are non-deterministic as to which
+        # path is returned, but it will always be the fully resolved path of
+        # one member of the cycle
         ABSTFN = ntpath.abspath(os_helper.TESTFN)
         self.addCleanup(os_helper.unlink, ABSTFN)
         self.addCleanup(os_helper.unlink, ABSTFN + "1")
@@ -385,6 +396,50 @@ class TestNtpath(NtpathTestCase):
 
         # Test using relative path as well.
         self.assertPathEqual(ntpath.realpath(ntpath.basename(ABSTFN)), ABSTFN)
+
+    @os_helper.skip_unless_symlink
+    @unittest.skipUnless(HAVE_GETFINALPATHNAME, 'need _getfinalpathname')
+    def test_realpath_symlink_loops_strict(self):
+        # Symlink loops raise OSError in strict mode
+        ABSTFN = ntpath.abspath(os_helper.TESTFN)
+        self.addCleanup(os_helper.unlink, ABSTFN)
+        self.addCleanup(os_helper.unlink, ABSTFN + "1")
+        self.addCleanup(os_helper.unlink, ABSTFN + "2")
+        self.addCleanup(os_helper.unlink, ABSTFN + "y")
+        self.addCleanup(os_helper.unlink, ABSTFN + "c")
+        self.addCleanup(os_helper.unlink, ABSTFN + "a")
+
+        os.symlink(ABSTFN, ABSTFN)
+        self.assertRaises(OSError, ntpath.realpath, ABSTFN, strict=True)
+
+        os.symlink(ABSTFN + "1", ABSTFN + "2")
+        os.symlink(ABSTFN + "2", ABSTFN + "1")
+        self.assertRaises(OSError, ntpath.realpath, ABSTFN + "1", strict=True)
+        self.assertRaises(OSError, ntpath.realpath, ABSTFN + "2", strict=True)
+        self.assertRaises(OSError, ntpath.realpath, ABSTFN + "1\\x", strict=True)
+        # Windows eliminates '..' components before resolving links, so the
+        # following call is not expected to raise.
+        self.assertPathEqual(ntpath.realpath(ABSTFN + "1\\..", strict=True),
+                             ntpath.dirname(ABSTFN))
+        self.assertRaises(OSError, ntpath.realpath, ABSTFN + "1\\..\\x", strict=True)
+        os.symlink(ABSTFN + "x", ABSTFN + "y")
+        self.assertRaises(OSError, ntpath.realpath, ABSTFN + "1\\..\\"
+                                             + ntpath.basename(ABSTFN) + "y",
+                                             strict=True)
+        self.assertRaises(OSError, ntpath.realpath,
+                          ABSTFN + "1\\..\\" + ntpath.basename(ABSTFN) + "1",
+                          strict=True)
+
+        os.symlink(ntpath.basename(ABSTFN) + "a\\b", ABSTFN + "a")
+        self.assertRaises(OSError, ntpath.realpath, ABSTFN + "a", strict=True)
+
+        os.symlink("..\\" + ntpath.basename(ntpath.dirname(ABSTFN))
+                   + "\\" + ntpath.basename(ABSTFN) + "c", ABSTFN + "c")
+        self.assertRaises(OSError, ntpath.realpath, ABSTFN + "c", strict=True)
+
+        # Test using relative path as well.
+        self.assertRaises(OSError, ntpath.realpath, ntpath.basename(ABSTFN),
+                          strict=True)
 
     @os_helper.skip_unless_symlink
     @unittest.skipUnless(HAVE_GETFINALPATHNAME, 'need _getfinalpathname')
@@ -479,6 +534,10 @@ class TestNtpath(NtpathTestCase):
             tester('ntpath.expandvars("\'%foo%\'%bar")', "\'%foo%\'%bar")
             tester('ntpath.expandvars("bar\'%foo%")', "bar\'%foo%")
 
+    # TODO: RUSTPYTHON, ValueError: illegal environment variable name
+    if sys.platform == 'win32':
+        test_expandvars = unittest.expectedFailure(test_expandvars)
+
     @unittest.skipUnless(os_helper.FS_NONASCII, 'need os_helper.FS_NONASCII')
     def test_expandvars_nonascii(self):
         def check(value, expected):
@@ -499,6 +558,10 @@ class TestNtpath(NtpathTestCase):
             check('%spam%bar', '%sbar' % nonascii)
             check('%{}%bar'.format(nonascii), 'ham%sbar' % nonascii)
 
+    # TODO: RUSTPYTHON, ValueError: illegal environment variable name
+    if sys.platform == 'win32':
+        test_expandvars_nonascii = unittest.expectedFailure(test_expandvars_nonascii)
+
     def test_expanduser(self):
         tester('ntpath.expanduser("test")', 'test')
 
@@ -506,34 +569,49 @@ class TestNtpath(NtpathTestCase):
             env.clear()
             tester('ntpath.expanduser("~test")', '~test')
 
-            env['HOMEPATH'] = 'eric\\idle'
             env['HOMEDRIVE'] = 'C:\\'
-            tester('ntpath.expanduser("~test")', 'C:\\eric\\test')
-            tester('ntpath.expanduser("~")', 'C:\\eric\\idle')
+            env['HOMEPATH'] = 'Users\\eric'
+            env['USERNAME'] = 'eric'
+            tester('ntpath.expanduser("~test")', 'C:\\Users\\test')
+            tester('ntpath.expanduser("~")', 'C:\\Users\\eric')
 
             del env['HOMEDRIVE']
-            tester('ntpath.expanduser("~test")', 'eric\\test')
-            tester('ntpath.expanduser("~")', 'eric\\idle')
+            tester('ntpath.expanduser("~test")', 'Users\\test')
+            tester('ntpath.expanduser("~")', 'Users\\eric')
 
             env.clear()
-            env['USERPROFILE'] = 'C:\\eric\\idle'
-            tester('ntpath.expanduser("~test")', 'C:\\eric\\test')
-            tester('ntpath.expanduser("~")', 'C:\\eric\\idle')
+            env['USERPROFILE'] = 'C:\\Users\\eric'
+            env['USERNAME'] = 'eric'
+            tester('ntpath.expanduser("~test")', 'C:\\Users\\test')
+            tester('ntpath.expanduser("~")', 'C:\\Users\\eric')
             tester('ntpath.expanduser("~test\\foo\\bar")',
-                   'C:\\eric\\test\\foo\\bar')
+                   'C:\\Users\\test\\foo\\bar')
             tester('ntpath.expanduser("~test/foo/bar")',
-                   'C:\\eric\\test/foo/bar')
+                   'C:\\Users\\test/foo/bar')
             tester('ntpath.expanduser("~\\foo\\bar")',
-                   'C:\\eric\\idle\\foo\\bar')
+                   'C:\\Users\\eric\\foo\\bar')
             tester('ntpath.expanduser("~/foo/bar")',
-                   'C:\\eric\\idle/foo/bar')
+                   'C:\\Users\\eric/foo/bar')
 
             # bpo-36264: ignore `HOME` when set on windows
             env.clear()
             env['HOME'] = 'F:\\'
-            env['USERPROFILE'] = 'C:\\eric\\idle'
-            tester('ntpath.expanduser("~test")', 'C:\\eric\\test')
-            tester('ntpath.expanduser("~")', 'C:\\eric\\idle')
+            env['USERPROFILE'] = 'C:\\Users\\eric'
+            env['USERNAME'] = 'eric'
+            tester('ntpath.expanduser("~test")', 'C:\\Users\\test')
+            tester('ntpath.expanduser("~")', 'C:\\Users\\eric')
+
+            # bpo-39899: don't guess another user's home directory if
+            # `%USERNAME% != basename(%USERPROFILE%)`
+            env.clear()
+            env['USERPROFILE'] = 'C:\\Users\\eric'
+            env['USERNAME'] = 'idle'
+            tester('ntpath.expanduser("~test")', '~test')
+            tester('ntpath.expanduser("~")', 'C:\\Users\\eric')
+
+    # TODO: RUSTPYTHON
+    if sys.platform == 'win32':
+        test_expanduser = unittest.expectedFailure(test_expanduser)
 
     @unittest.skipUnless(nt, "abspath requires 'nt' module")
     def test_abspath(self):
@@ -728,9 +806,6 @@ class NtCommonTest(test_genericpath.CommonTest, unittest.TestCase):
     pathmodule = ntpath
     attributes = ['relpath']
 
-    def test_expandvars_nonascii(self):
-        super().test_expandvars_nonascii()
-
     # TODO: RUSTPYTHON
     if sys.platform == "linux":
         @unittest.expectedFailure
@@ -739,26 +814,34 @@ class NtCommonTest(test_genericpath.CommonTest, unittest.TestCase):
 
     # TODO: RUSTPYTHON
     if sys.platform == "win32":
+        # TODO: RUSTPYTHON, ValueError: illegal environment variable name
         @unittest.expectedFailure
-        def test_samefile(self):
+        def test_expandvars(self):  # TODO: RUSTPYTHON; remove when done
+            super().test_expandvars()
+
+        # TODO: RUSTPYTHON, ValueError: illegal environment variable name
+        @unittest.expectedFailure
+        def test_expandvars_nonascii(self):  # TODO: RUSTPYTHON; remove when done
+            super().test_expandvars_nonascii()
+
+        # TODO: RUSTPYTHON
+        @unittest.expectedFailure
+        def test_samefile(self):  # TODO: RUSTPYTHON; remove when done
             super().test_samefile()
 
-    # TODO: RUSTPYTHON
-    if sys.platform == "win32":
+        # TODO: RUSTPYTHON
         @unittest.expectedFailure
-        def test_samefile_on_link(self):
+        def test_samefile_on_link(self):  # TODO: RUSTPYTHON; remove when done
             super().test_samefile_on_link()
 
-    # TODO: RUSTPYTHON
-    if sys.platform == "win32":
+        # TODO: RUSTPYTHON
         @unittest.expectedFailure
-        def test_samestat(self):
+        def test_samestat(self):  # TODO: RUSTPYTHON; remove when done
             super().test_samestat()
 
-    # TODO: RUSTPYTHON
-    if sys.platform == "win32":
+        # TODO: RUSTPYTHON
         @unittest.expectedFailure
-        def test_samestat_on_link(self):
+        def test_samestat_on_link(self):  # TODO: RUSTPYTHON; remove when done
             super().test_samestat_on_link()
 
 
@@ -767,7 +850,7 @@ class PathLikeTests(NtpathTestCase):
     path = ntpath
 
     def setUp(self):
-        self.file_name = os_helper.TESTFN.lower()
+        self.file_name = os_helper.TESTFN
         self.file_path = FakePath(os_helper.TESTFN)
         self.addCleanup(os_helper.unlink, self.file_name)
         with open(self.file_name, 'xb', 0) as file:
@@ -778,6 +861,12 @@ class PathLikeTests(NtpathTestCase):
 
     def test_path_normcase(self):
         self._check_function(self.path.normcase)
+        if sys.platform == 'win32':
+            self.assertEqual(ntpath.normcase('\u03a9\u2126'), 'ωΩ')
+
+    # TODO: RUSTPYTHON, AssertionError: 'ωω' != 'ωΩ'
+    if sys.platform == "win32":
+        test_path_normcase = unittest.expectedFailure(test_path_normcase)
 
     def test_path_isabs(self):
         self._check_function(self.path.isabs)

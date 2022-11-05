@@ -78,7 +78,7 @@ mod winreg {
         }
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl PyHkey {
         #[pymethod]
         fn Close(&self) {
@@ -191,7 +191,7 @@ mod winreg {
         key.with_key(|k| k.get_raw_value(subkey))
             .map_err(|e| e.to_pyexception(vm))
             .and_then(|regval| {
-                let ty = regval.vtype.clone() as usize;
+                let ty = regval.vtype as usize;
                 Ok((reg_to_py(regval, vm)?, ty))
             })
     }
@@ -221,7 +221,7 @@ mod winreg {
             })
             .map_err(|e| e.to_pyexception(vm))
             .and_then(|(name, value)| {
-                let ty = value.vtype.clone() as usize;
+                let ty = value.vtype as usize;
                 Ok((name, reg_to_py(value, vm)?, ty))
             })
     }
@@ -304,7 +304,7 @@ mod winreg {
                 let nul_pos = wide_slice
                     .iter()
                     .position(|w| *w == 0)
-                    .unwrap_or_else(|| wide_slice.len());
+                    .unwrap_or(wide_slice.len());
                 let s = String::from_utf16_lossy(&wide_slice[..nul_pos]);
                 Ok(vm.ctx.new_str(s).into())
             }

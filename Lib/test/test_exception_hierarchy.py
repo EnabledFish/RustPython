@@ -5,6 +5,7 @@ import socket
 import unittest
 import errno
 from errno import EEXIST
+import sys
 
 
 class SubOSError(OSError):
@@ -93,6 +94,11 @@ class HierarchyTest(unittest.TestCase):
             e = OSError(errcode, "Some message")
             self.assertIs(type(e), OSError)
 
+    # TODO: RUSTPYTHON
+    import sys
+    if sys.platform == 'win32':
+        test_errno_mapping = unittest.expectedFailure(test_errno_mapping)
+
     def test_try_except(self):
         filename = "some_hopefully_non_existing_file"
 
@@ -125,8 +131,8 @@ class AttributesTest(unittest.TestCase):
         else:
             self.assertNotIn('winerror', dir(OSError))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
+    @unittest.skip("TODO: RUSTPYTHON")
+    @unittest.skipIf(sys.platform == 'win32', 'winerror not filled yet')
     def test_posix_error(self):
         e = OSError(EEXIST, "File already exists", "foo.txt")
         self.assertEqual(e.errno, EEXIST)
@@ -136,6 +142,8 @@ class AttributesTest(unittest.TestCase):
         if os.name == "nt":
             self.assertEqual(e.winerror, None)
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     @unittest.skipUnless(os.name == "nt", "Windows-specific test")
     def test_errno_translation(self):
         # ERROR_ALREADY_EXISTS (183) -> EEXIST

@@ -275,6 +275,8 @@ class SysModuleTest(unittest.TestCase):
         finally:
             sys.setrecursionlimit(oldlimit)
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_getwindowsversion(self):
         # Raise SkipTest if sys doesn't have getwindowsversion attribute
         test.support.get_attribute(sys, "getwindowsversion")
@@ -482,8 +484,6 @@ class SysModuleTest(unittest.TestCase):
         leave_g.set()
         t.join()
 
-    # TODO: RUSTPYTHON, AttributeError: module 'sys' has no attribute 'orig_argv'
-    @unittest.expectedFailure
     def test_attributes(self):
         self.assertIsInstance(sys.api_version, int)
         self.assertIsInstance(sys.argv, list)
@@ -571,8 +571,6 @@ class SysModuleTest(unittest.TestCase):
         if not sys.platform.startswith('win'):
             self.assertIsInstance(sys.abiflags, str)
 
-    # TODO: RUSTPYTHON, AttributeError: module 'sys' has no attribute 'thread_info'
-    @unittest.expectedFailure
     def test_thread_info(self):
         info = sys.thread_info
         self.assertEqual(len(info), 3)
@@ -637,6 +635,8 @@ class SysModuleTest(unittest.TestCase):
     def test_sys_version_info_no_instantiation(self):
         self.assert_raise_on_new_sys_type(sys.version_info)
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_sys_getwindowsversion_no_instantiation(self):
         # Skip if not being run on Windows.
         test.support.get_attribute(sys, "getwindowsversion")
@@ -892,7 +892,7 @@ class SysModuleTest(unittest.TestCase):
         c = sys.getallocatedblocks()
         self.assertIn(c, range(b - 50, b + 50))
 
-    # TODO: RUSTPYTHON, AttributeError: module 'sys' has no attribute 'is_finalizing'
+    # TODO: RUSTPYTHON, AtExit.__del__ is not invoked because module destruction is missing.
     @unittest.expectedFailure
     def test_is_finalizing(self):
         self.assertIs(sys.is_finalizing(), False)
@@ -1004,8 +1004,6 @@ class SysModuleTest(unittest.TestCase):
         out = out.decode('ascii', 'replace').rstrip()
         self.assertEqual(out, 'mbcs replace')
 
-    # TODO: RUSTPYTHON, subprocess.CalledProcessError: Command ... returned non-zero exit status 1.
-    @unittest.expectedFailure
     def test_orig_argv(self):
         code = textwrap.dedent('''
             import sys

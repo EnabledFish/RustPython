@@ -69,7 +69,7 @@ mod fcntl {
                     arg_len = s.len();
                     buf.get_mut(..arg_len)
                         .ok_or_else(|| vm.new_value_error("fcntl string arg too long".to_owned()))?
-                        .copy_from_slice(&*s)
+                        .copy_from_slice(&s)
                 }
                 let ret = unsafe { libc::fcntl(fd, cmd, buf.as_mut_ptr()) };
                 if ret < 0 {
@@ -89,8 +89,8 @@ mod fcntl {
 
     #[pyfunction]
     fn ioctl(
-        fd: i32,
-        request: i32,
+        io::Fildes(fd): io::Fildes,
+        request: u32,
         arg: OptionalArg<Either<Either<ArgMemoryBuffer, ArgStrOrBytesLike>, i32>>,
         mutate_flag: OptionalArg<bool>,
         vm: &VirtualMachine,
@@ -143,7 +143,7 @@ mod fcntl {
     // XXX: at the time of writing, wasi and redox don't have the necessary constants/function
     #[cfg(not(any(target_os = "wasi", target_os = "redox")))]
     #[pyfunction]
-    fn flock(fd: i32, operation: i32, vm: &VirtualMachine) -> PyResult {
+    fn flock(io::Fildes(fd): io::Fildes, operation: i32, vm: &VirtualMachine) -> PyResult {
         let ret = unsafe { libc::flock(fd, operation) };
         // TODO: add support for platforms that don't have a builtin `flock` syscall
         if ret < 0 {
@@ -156,29 +156,31 @@ mod fcntl {
     #[cfg(not(any(target_os = "wasi", target_os = "redox")))]
     #[pyfunction]
     fn lockf(
-        fd: i32,
+        io::Fildes(fd): io::Fildes,
         cmd: i32,
         len: OptionalArg<PyIntRef>,
         start: OptionalArg<PyIntRef>,
         whence: OptionalArg<i32>,
         vm: &VirtualMachine,
     ) -> PyResult {
+        macro_rules! try_into_l_type {
+            ($l_type:path) => {
+                $l_type
+                    .try_into()
+                    .map_err(|e| vm.new_overflow_error(format!("{e}")))
+            };
+        }
+
         let mut l: libc::flock = unsafe { std::mem::zeroed() };
-        if cmd == libc::LOCK_UN {
-            l.l_type = libc::F_UNLCK
-                .try_into()
-                .map_err(|e| vm.new_overflow_error(format!("{e}")))?;
+        l.l_type = if cmd == libc::LOCK_UN {
+            try_into_l_type!(libc::F_UNLCK)
         } else if (cmd & libc::LOCK_SH) != 0 {
-            l.l_type = libc::F_RDLCK
-                .try_into()
-                .map_err(|e| vm.new_overflow_error(format!("{e}")))?;
+            try_into_l_type!(libc::F_RDLCK)
         } else if (cmd & libc::LOCK_EX) != 0 {
-            l.l_type = libc::F_WRLCK
-                .try_into()
-                .map_err(|e| vm.new_overflow_error(format!("{e}")))?;
+            try_into_l_type!(libc::F_WRLCK)
         } else {
             return Err(vm.new_value_error("unrecognized lockf argument".to_owned()));
-        }
+        }?;
         l.l_start = match start {
             OptionalArg::Present(s) => s.try_to_primitive(vm)?,
             OptionalArg::Missing => 0,

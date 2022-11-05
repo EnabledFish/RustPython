@@ -2,8 +2,7 @@ use crate::{
     builtins::{PyIntRef, PyTupleRef},
     cformat::CFormatString,
     function::OptionalOption,
-    protocol::PyIterIter,
-    AsObject, PyObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine,
+    PyObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine,
 };
 use num_traits::{cast::ToPrimitive, sign::Signed};
 use std::str::FromStr;
@@ -312,7 +311,9 @@ pub trait AnyStr<'s>: 's {
 
     fn py_join<'a>(
         &self,
-        mut iter: PyIterIter<'a, impl AnyStrWrapper<'s, Str = Self> + TryFromObject>,
+        mut iter: impl std::iter::Iterator<
+            Item = PyResult<impl AnyStrWrapper<'s, Str = Self> + TryFromObject>,
+        >,
     ) -> PyResult<Self::Container> {
         let mut joined = if let Some(elem) = iter.next() {
             elem?.as_ref().to_container()
@@ -378,7 +379,7 @@ pub trait AnyStr<'s>: 's {
     where
         FW: Fn(&Self) -> W,
     {
-        let keep = if options.keepends { 1 } else { 0 };
+        let keep = options.keepends as usize;
         let mut elements = Vec::new();
         let mut last_i = 0;
         let mut enumerated = self.as_bytes().iter().enumerate().peekable();

@@ -64,7 +64,7 @@ mod unicodedata {
         }
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl Ucd {
         #[pymethod]
         fn category(&self, character: PyStrRef, vm: &VirtualMachine) -> PyResult<String> {
@@ -132,7 +132,7 @@ mod unicodedata {
             Ok(normalized_text)
         }
 
-        #[pyproperty]
+        #[pygetset]
         fn unidata_version(&self) -> String {
             self.unic_version.to_string()
         }

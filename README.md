@@ -104,7 +104,7 @@ cargo build --release --target wasm32-wasi --features="freeze-stdlib"
 
 ### JIT (Just in time) compiler
 
-RustPython has an **very** experimental JIT compiler that compile python functions into native code. 
+RustPython has a **very** experimental JIT compiler that compile python functions into native code. 
 
 #### Building
 
@@ -157,6 +157,7 @@ make cool projects:
 - [pyckitup](https://github.com/pickitup247/pyckitup): a game engine written in
   rust.
 - [Robot Rumble](https://github.com/robot-rumble/logic/): an arena-based AI competition platform
+- [Ruff](https://github.com/charliermarsh/ruff/): an extremely fast Python linter, written in Rust
 
 ## Goals
 
@@ -198,7 +199,7 @@ To enhance CPython compatibility, try to increase unittest coverage by checking 
 Another approach is to checkout the source code: builtin functions and object
 methods are often the simplest and easiest way to contribute.
 
-You can also simply run `./whats_left.sh` to assist in finding any unimplemented
+You can also simply run `./whats_left.py` to assist in finding any unimplemented
 method.
 
 ## Compiling to WebAssembly

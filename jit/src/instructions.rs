@@ -1,6 +1,6 @@
 use cranelift::prelude::*;
 use num_traits::cast::ToPrimitive;
-use rustpython_bytecode::{
+use rustpython_compiler_core::{
     self as bytecode, BinaryOperator, BorrowedConstant, CodeObject, ComparisonOperator,
     Instruction, Label, UnaryOperator,
 };
@@ -194,7 +194,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.builder.ins().brz(val, then_block, &[]);
 
                 let block = self.builder.create_block();
-                self.builder.ins().fallthrough(block, &[]);
+                self.builder.ins().jump(block, &[]);
                 self.builder.switch_to_block(block);
 
                 Ok(())
@@ -207,7 +207,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.builder.ins().brnz(val, then_block, &[]);
 
                 let block = self.builder.create_block();
-                self.builder.ins().fallthrough(block, &[]);
+                self.builder.ins().jump(block, &[]);
                 self.builder.switch_to_block(block);
 
                 Ok(())

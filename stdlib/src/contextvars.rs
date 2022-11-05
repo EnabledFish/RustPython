@@ -14,7 +14,7 @@ mod _contextvars {
     #[derive(Debug, PyPayload)]
     struct PyContext {} // not to confuse with vm::Context
 
-    #[pyimpl(with(Initializer))]
+    #[pyclass(with(Initializer))]
     impl PyContext {
         #[pymethod]
         fn run(
@@ -99,9 +99,9 @@ mod _contextvars {
         default: OptionalArg<PyObjectRef>,
     }
 
-    #[pyimpl(with(Initializer))]
+    #[pyclass(with(Initializer))]
     impl ContextVar {
-        #[pyproperty]
+        #[pygetset]
         fn name(&self) -> String {
             self.name.clone()
         }
@@ -172,14 +172,14 @@ mod _contextvars {
         old_value: PyObjectRef,
     }
 
-    #[pyimpl(with(Initializer))]
+    #[pyclass(with(Initializer))]
     impl ContextToken {
-        #[pyproperty]
+        #[pygetset]
         fn var(&self, _vm: &VirtualMachine) -> PyObjectRef {
             unimplemented!("Token.var() is currently under construction")
         }
 
-        #[pyproperty]
+        #[pygetset]
         fn old_value(&self, _vm: &VirtualMachine) -> PyObjectRef {
             unimplemented!("Token.old_value() is currently under construction")
         }

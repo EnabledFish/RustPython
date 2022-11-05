@@ -30,8 +30,8 @@ class UserDictTest(mapping_tests.TestHashMappingProtocol):
         self.assertEqual(collections.UserDict(one=1, two=2), d2)
         # item sequence constructor
         self.assertEqual(collections.UserDict([('one',1), ('two',2)]), d2)
-        with self.assertWarnsRegex(DeprecationWarning, "'dict'"):
-            self.assertEqual(collections.UserDict(dict=[('one',1), ('two',2)]), d2)
+        self.assertEqual(collections.UserDict(dict=[('one',1), ('two',2)]),
+                         {'dict': [('one', 1), ('two', 2)]})
         # both together
         self.assertEqual(collections.UserDict([('one',1), ('two',2)], two=3, three=5), d3)
 
@@ -149,9 +149,8 @@ class UserDictTest(mapping_tests.TestHashMappingProtocol):
                          [('dict', 42)])
         self.assertEqual(list(collections.UserDict({}, dict=None).items()),
                          [('dict', None)])
-        with self.assertWarnsRegex(DeprecationWarning, "'dict'"):
-            self.assertEqual(list(collections.UserDict(dict={'a': 42}).items()),
-                             [('a', 42)])
+        self.assertEqual(list(collections.UserDict(dict={'a': 42}).items()),
+                         [('dict', {'a': 42})])
         self.assertRaises(TypeError, collections.UserDict, 42)
         self.assertRaises(TypeError, collections.UserDict, (), ())
         self.assertRaises(TypeError, collections.UserDict.__init__)
@@ -213,13 +212,6 @@ class UserDictTest(mapping_tests.TestHashMappingProtocol):
             self.assertEqual(err.args, (42,))
         else:
             self.fail("g[42] didn't raise KeyError")
-
-    # TODO: RUSTPYTHON
-    import sys
-    @unittest.skipIf(sys.platform == "win32", "TODO: RUSTPYTHON, thread 'main' has overflowed its stack")
-    def test_repr_deep(self):
-        super().test_repr_deep()
-
 
 
 if __name__ == "__main__":

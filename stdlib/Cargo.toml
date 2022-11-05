@@ -5,8 +5,15 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+threading = ["rustpython-common/threading", "rustpython-vm/threading"]
+zlib = ["libz-sys", "flate2/zlib"]
+bz2 = ["bzip2"]
+ssl = ["openssl", "openssl-sys", "foreign-types-shared"]
+ssl-vendor = ["ssl", "openssl/vendored", "openssl-probe"]
+
 [dependencies]
-rustpython-parser = { path = "../parser", optional = true }
+# rustpython crates
 rustpython-derive = { path = "../derive" }
 rustpython-vm = { path = "../vm" }
 rustpython-common = { path = "../common" }
@@ -41,12 +48,14 @@ unic-ucd-ident     = "0.9.0"
 adler32 = "1.2.0"
 crc32fast = "1.3.2"
 flate2 = "1.0.23"
+bzip2 = { version = "0.4", optional = true }
 
 num-complex = "0.4.0"
 num-bigint = "0.4.3"
 num-integer = "0.1.44"
+num-rational = "0.4.1"
 
-crossbeam-utils = "0.8.8"
+crossbeam-utils = "=0.8.9"
 itertools = "0.10.3"
 lexical-parse-float = "0.8.3"
 num-traits = "0.2.14"
@@ -55,32 +64,29 @@ base64 = "0.13.0"
 csv-core = "0.1.10"
 hex = "0.4.3"
 puruspe = "0.1.5"
-nix = "0.23.1"
+nix = "0.24"
 xml-rs = "0.8.4"
-libc = "0.2.123"
+libc = "0.2.133"
 cfg-if = "1.0.0"
 ahash = "0.7.6"
 libz-sys = { version = "1.1.5", optional = true }
 num_enum = "0.5.7"
 ascii = "1.0.0"
+parking_lot = "0.12.0"
 
-[target.'cfg(all(unix, not(target_os = "redox")))'.dependencies]
+# uuid
+[target.'cfg(not(any(target_os = "ios", target_os = "android", target_os = "windows", target_arch = "wasm32")))'.dependencies]
+mac_address = "1.1.3"
+once_cell = "1.13.0"
+uuid = { version = "1.1.2", features = ["v1", "fast-rng", "macro-diagnostics"] }
+
+# mmap
+[target.'cfg(all(unix, not(target_arch = "wasm32")))'.dependencies]
+memmap2 = "0.5.4"
+page_size = "0.4"
+
+[target.'cfg(all(unix, not(target_os = "redox"), not(target_os = "ios")))'.dependencies]
 termios = "0.3.3"
-
-[features]
-default = ["compile-parse", "pylib"]
-pylib = ["rustpython-vm/pylib"]
-compile-parse = ["rustpython-vm/compile-parse", "rustpython-parser"]
-threading = ["rustpython-common/threading", "rustpython-vm/threading"]
-parser = ["rustpython-vm/parser"]
-ast = ["rustpython-vm/ast"]
-compiler = ["rustpython-vm/compiler"]
-# compiler = ["rustpython-compiler", "rustpython-compiler-core", "ast"]
-# parser = ["rustpython-parser", "ast"]
-
-zlib = ["libz-sys", "flate2/zlib"]
-ssl = ["openssl", "openssl-sys", "foreign-types-shared"]
-ssl-vendor = ["ssl", "openssl/vendored", "openssl-probe"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 gethostname = "0.2.3"

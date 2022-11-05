@@ -6,10 +6,6 @@ use crate::{
     Context, Py, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
 
-/// filter(function or None, iterable) --> filter object
-///
-/// Return an iterator yielding those items of iterable for which function(item)
-/// is true. If function is None, return the items that are true.
 #[pyclass(module = false, name = "filter")]
 #[derive(Debug)]
 pub struct PyFilter {
@@ -36,7 +32,7 @@ impl Constructor for PyFilter {
     }
 }
 
-#[pyimpl(with(IterNext, Constructor), flags(BASETYPE))]
+#[pyclass(with(IterNext, Constructor), flags(BASETYPE))]
 impl PyFilter {
     #[pymethod(magic)]
     fn reduce(&self, vm: &VirtualMachine) -> (PyTypeRef, (PyObjectRef, PyIter)) {

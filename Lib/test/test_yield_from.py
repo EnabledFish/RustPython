@@ -298,11 +298,6 @@ class TestPEP380Operation(unittest.TestCase):
             "Finishing g1",
         ])
 
-    # TODO: RUSTPYTHON
-    import os
-    if os.getenv("CI"):
-        test_handing_exception_while_delegating_close = unittest.expectedFailure(test_handing_exception_while_delegating_close)
-
     def test_delegating_throw(self):
         """
         Test delegating 'throw'
@@ -343,8 +338,6 @@ class TestPEP380Operation(unittest.TestCase):
             "Finishing g1",
         ])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_value_attribute_of_StopIteration_exception(self):
         """
         Test 'value' attribute of StopIteration exception
@@ -889,11 +882,6 @@ class TestPEP380Operation(unittest.TestCase):
             "Enter f",
         ])
 
-    # TODO: RUSTPYTHON
-    import os
-    if os.getenv("CI"):
-        test_throwing_GeneratorExit_into_subgen_that_raises = unittest.expectedFailure(test_throwing_GeneratorExit_into_subgen_that_raises)
-
     def test_yield_from_empty(self):
         def g():
             yield from ()
@@ -958,6 +946,9 @@ class TestPEP380Operation(unittest.TestCase):
                 res.append(g1.throw(MyErr))
         except StopIteration:
             pass
+        except:
+            self.assertEqual(res, [0, 1, 2, 3])
+            raise
         # Check with close
         class MyIt(object):
             def __iter__(self):

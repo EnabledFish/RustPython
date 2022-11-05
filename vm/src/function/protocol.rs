@@ -84,14 +84,14 @@ where
     T: TryFromObject,
 {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
-        let iterfn;
-        {
+        let iterfn = {
             let cls = obj.class();
-            iterfn = cls.mro_find_map(|x| x.slots.iter.load());
+            let iterfn = cls.mro_find_map(|x| x.slots.iter.load());
             if iterfn.is_none() && !cls.has_attr(identifier!(vm, __getitem__)) {
                 return Err(vm.new_type_error(format!("'{}' object is not iterable", cls.name())));
             }
-        }
+            iterfn
+        };
         Ok(Self {
             iterable: obj,
             iterfn,
@@ -116,13 +116,16 @@ impl ArgMapping {
     pub fn from_dict_exact(dict: PyDictRef) -> Self {
         Self {
             obj: dict.into(),
-            methods: &PyDict::AS_MAPPING,
+            methods: PyDict::as_mapping(),
         }
     }
 
     #[inline(always)]
     pub fn mapping(&self) -> PyMapping {
-        PyMapping::with_methods(&self.obj, self.methods)
+        PyMapping {
+            obj: &self.obj,
+            methods: self.methods,
+        }
     }
 }
 

@@ -4,22 +4,27 @@ pub(crate) use sys::{UnraisableHookArgs, MAXSIZE, MULTIARCH};
 
 #[pymodule]
 mod sys {
-    use crate::common::{
-        ascii,
-        hash::{PyHash, PyUHash},
-    };
     use crate::{
         builtins::{PyDictRef, PyNamespace, PyStr, PyStrRef, PyTupleRef, PyTypeRef},
+        common::{
+            ascii,
+            hash::{PyHash, PyUHash},
+        },
         frame::FrameRef,
         function::{FuncArgs, OptionalArg, PosArgs},
         stdlib::builtins,
+        stdlib::warnings::warn,
         types::PyStructSequence,
         version,
         vm::{Settings, VirtualMachine},
         AsObject, PyObjectRef, PyRef, PyRefExact, PyResult,
     };
     use num_traits::ToPrimitive;
-    use std::{env, mem, path};
+    use std::{
+        env::{self, VarError},
+        mem, path,
+        sync::atomic::Ordering,
+    };
 
     // not the same as CPython (e.g. rust's x86_x64-unknown-linux-gnu is just x86_64-linux-gnu)
     // but hopefully that's just an implementation detail? TODO: copy CPython's multiarch exactly,
@@ -218,6 +223,11 @@ mod sys {
     }
 
     #[pyattr]
+    fn orig_argv(vm: &VirtualMachine) -> Vec<PyObjectRef> {
+        env::args().map(|arg| vm.ctx.new_str(arg).into()).collect()
+    }
+
+    #[pyattr]
     fn path(vm: &VirtualMachine) -> Vec<PyObjectRef> {
         vm.state
             .settings
@@ -309,6 +319,66 @@ mod sys {
         let exc = vm.normalize_exception(exc_type, exc_val, exc_tb)?;
         let stderr = super::get_stderr(vm)?;
         vm.write_exception(&mut crate::py_io::PyWriter(stderr, vm), &exc)
+    }
+
+    #[pyfunction(name = "__breakpointhook__")]
+    #[pyfunction]
+    pub fn breakpointhook(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        let envar = std::env::var("PYTHONBREAKPOINT")
+            .and_then(|envar| {
+                if envar.is_empty() {
+                    Err(VarError::NotPresent)
+                } else {
+                    Ok(envar)
+                }
+            })
+            .unwrap_or_else(|_| "pdb.set_trace".to_owned());
+
+        if envar.eq("0") {
+            return Ok(vm.ctx.none());
+        };
+
+        let print_unimportable_module_warn = || {
+            warn(
+                vm.ctx.exceptions.runtime_warning,
+                format!(
+                    "Ignoring unimportable $PYTHONBREAKPOINT: \"{}\"",
+                    envar.to_owned(),
+                ),
+                0,
+                vm,
+            )
+            .unwrap();
+            Ok(vm.ctx.none())
+        };
+
+        let last = match envar.split('.').last() {
+            Some(last) => last,
+            None => {
+                return print_unimportable_module_warn();
+            }
+        };
+
+        let (modulepath, attrname) = if last.eq(&envar) {
+            ("builtins".to_owned(), envar.to_owned())
+        } else {
+            (
+                envar[..(envar.len() - last.len() - 1)].to_owned(),
+                last.to_owned(),
+            )
+        };
+
+        let module = match vm.import(modulepath, None, 0) {
+            Ok(module) => module,
+            Err(_) => {
+                return print_unimportable_module_warn();
+            }
+        };
+
+        match vm.get_attribute_opt(module, attrname) {
+            Ok(Some(hook)) => vm.invoke(hook.as_ref(), args),
+            _ => print_unimportable_module_warn(),
+        }
     }
 
     #[pyfunction]
@@ -522,6 +592,11 @@ mod sys {
     }
 
     #[pyfunction]
+    fn is_finalizing(vm: &VirtualMachine) -> bool {
+        vm.state.finalizing.load(Ordering::Acquire)
+    }
+
+    #[pyfunction]
     fn setprofile(profilefunc: PyObjectRef, vm: &VirtualMachine) {
         vm.profile_func.replace(profilefunc);
         update_use_tracing(vm);
@@ -554,6 +629,12 @@ mod sys {
     fn settrace(tracefunc: PyObjectRef, vm: &VirtualMachine) {
         vm.trace_func.replace(tracefunc);
         update_use_tracing(vm);
+    }
+
+    #[cfg(feature = "threading")]
+    #[pyattr]
+    fn thread_info(vm: &VirtualMachine) -> PyTupleRef {
+        PyThreadInfo::INFO.into_struct_sequence(vm)
     }
 
     #[pyattr]
@@ -608,7 +689,7 @@ mod sys {
         warn_default_encoding: u8,
     }
 
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl Flags {
         fn from_settings(settings: &Settings) -> Self {
             Self {
@@ -637,6 +718,27 @@ mod sys {
         }
     }
 
+    #[cfg(feature = "threading")]
+    #[pyclass(noattr, name = "thread_info")]
+    #[derive(PyStructSequence)]
+    pub(super) struct PyThreadInfo {
+        name: Option<&'static str>,
+        lock: Option<&'static str>,
+        version: Option<&'static str>,
+    }
+
+    #[cfg(feature = "threading")]
+    #[pyclass(with(PyStructSequence))]
+    impl PyThreadInfo {
+        const INFO: Self = PyThreadInfo {
+            name: crate::stdlib::thread::_thread::PYTHREAD_NAME,
+            /// As I know, there's only way to use lock as "Mutex" in Rust
+            /// with satisfying python document spec.
+            lock: Some("mutex+cond"),
+            version: None,
+        };
+    }
+
     #[pyclass(noattr, name = "float_info")]
     #[derive(PyStructSequence)]
     pub(super) struct PyFloatInfo {
@@ -652,7 +754,8 @@ mod sys {
         radix: u32,
         rounds: i32,
     }
-    #[pyimpl(with(PyStructSequence))]
+
+    #[pyclass(with(PyStructSequence))]
     impl PyFloatInfo {
         const INFO: Self = PyFloatInfo {
             max: f64::MAX,
@@ -683,7 +786,7 @@ mod sys {
         cutoff: usize,
     }
 
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl PyHashInfo {
         const INFO: Self = {
             use rustpython_common::hash::*;
@@ -707,7 +810,8 @@ mod sys {
         bits_per_digit: usize,
         sizeof_digit: usize,
     }
-    #[pyimpl(with(PyStructSequence))]
+
+    #[pyclass(with(PyStructSequence))]
     impl PyIntInfo {
         const INFO: Self = PyIntInfo {
             bits_per_digit: 30, //?
@@ -725,7 +829,7 @@ mod sys {
         serial: usize,
     }
 
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl VersionInfo {
         pub const VERSION: VersionInfo = VersionInfo {
             major: version::MAJOR,
@@ -759,8 +863,9 @@ mod sys {
         product_type: u8,
         platform_version: (u32, u32, u32),
     }
+
     #[cfg(windows)]
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl WindowsVersion {}
 
     #[pyclass(noattr, name = "UnraisableHookArgs")]
@@ -773,7 +878,7 @@ mod sys {
         pub object: PyObjectRef,
     }
 
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl UnraisableHookArgs {}
 }
 

@@ -379,6 +379,7 @@ impl FormatSpec {
                     magnitude,
                     float_ops::Case::Upper,
                     false,
+                    false,
                 ))
             }
             Some(FormatType::GeneralFormatLower) => {
@@ -387,6 +388,7 @@ impl FormatSpec {
                     precision,
                     magnitude,
                     float_ops::Case::Lower,
+                    false,
                     false,
                 ))
             }
@@ -408,7 +410,19 @@ impl FormatSpec {
             None => match magnitude {
                 magnitude if magnitude.is_nan() => Ok("nan".to_owned()),
                 magnitude if magnitude.is_infinite() => Ok("inf".to_owned()),
-                _ => Ok(float_ops::to_string(magnitude)),
+                _ => match self.precision {
+                    Some(_) => {
+                        let precision = self.precision.unwrap_or(magnitude.to_string().len() - 1);
+                        Ok(float_ops::format_general(
+                            precision,
+                            magnitude,
+                            float_ops::Case::Lower,
+                            false,
+                            true,
+                        ))
+                    }
+                    None => Ok(float_ops::to_string(magnitude)),
+                },
             },
         };
 
@@ -424,7 +438,15 @@ impl FormatSpec {
             }
         };
 
-        self.format_sign_and_align(&magnitude_string, sign_str)
+        self.format_sign_and_align(&magnitude_string, sign_str, FormatAlign::Right)
+    }
+
+    #[inline]
+    fn format_int_radix(&self, magnitude: BigInt, radix: u32) -> Result<String, &'static str> {
+        match self.precision {
+            Some(_) => Err("Precision not allowed in integer format specifier"),
+            None => Ok(magnitude.to_str_radix(radix)),
+        }
     }
 
     pub(crate) fn format_int(&self, num: &BigInt) -> Result<String, &'static str> {
@@ -441,16 +463,19 @@ impl FormatSpec {
             ""
         };
         let raw_magnitude_string_result: Result<String, &'static str> = match self.format_type {
-            Some(FormatType::Binary) => Ok(magnitude.to_str_radix(2)),
-            Some(FormatType::Decimal) => Ok(magnitude.to_str_radix(10)),
-            Some(FormatType::Octal) => Ok(magnitude.to_str_radix(8)),
-            Some(FormatType::HexLower) => Ok(magnitude.to_str_radix(16)),
-            Some(FormatType::HexUpper) => {
-                let mut result = magnitude.to_str_radix(16);
-                result.make_ascii_uppercase();
-                Ok(result)
-            }
-            Some(FormatType::Number) => Ok(magnitude.to_str_radix(10)),
+            Some(FormatType::Binary) => self.format_int_radix(magnitude, 2),
+            Some(FormatType::Decimal) => self.format_int_radix(magnitude, 10),
+            Some(FormatType::Octal) => self.format_int_radix(magnitude, 8),
+            Some(FormatType::HexLower) => self.format_int_radix(magnitude, 16),
+            Some(FormatType::HexUpper) => match self.precision {
+                Some(_) => Err("Precision not allowed in integer format specifier"),
+                None => {
+                    let mut result = magnitude.to_str_radix(16);
+                    result.make_ascii_uppercase();
+                    Ok(result)
+                }
+            },
+            Some(FormatType::Number) => self.format_int_radix(magnitude, 10),
             Some(FormatType::String) => Err("Unknown format code 's' for object of type 'int'"),
             Some(FormatType::Character) => Err("Unknown format code 'c' for object of type 'int'"),
             Some(FormatType::GeneralFormatUpper) => {
@@ -467,7 +492,7 @@ impl FormatSpec {
                 Some(float) => return self.format_float(float),
                 _ => Err("Unable to convert int to float"),
             },
-            None => Ok(magnitude.to_str_radix(10)),
+            None => self.format_int_radix(magnitude, 10),
         };
         let magnitude_string = format!(
             "{}{}",
@@ -485,12 +510,19 @@ impl FormatSpec {
             },
         };
 
-        self.format_sign_and_align(&magnitude_string, sign_str)
+        self.format_sign_and_align(&magnitude_string, sign_str, FormatAlign::Right)
     }
 
     pub(crate) fn format_string(&self, s: &str) -> Result<String, &'static str> {
         match self.format_type {
-            Some(FormatType::String) | None => self.format_sign_and_align(s, ""),
+            Some(FormatType::String) | None => self
+                .format_sign_and_align(s, "", FormatAlign::Left)
+                .map(|mut value| {
+                    if let Some(precision) = self.precision {
+                        value.truncate(precision);
+                    }
+                    value
+                }),
             _ => Err("Unknown format code for object of type 'str'"),
         }
     }
@@ -499,8 +531,9 @@ impl FormatSpec {
         &self,
         magnitude_string: &str,
         sign_str: &str,
+        default_align: FormatAlign,
     ) -> Result<String, &'static str> {
-        let align = self.align.unwrap_or(FormatAlign::Right);
+        let align = self.align.unwrap_or(default_align);
 
         // Use the byte length as the string length since we're in ascii
         let num_chars = magnitude_string.len();
@@ -918,7 +951,7 @@ impl<'a> FromTemplate<'a> for FormatString {
         let mut cur_text: &str = text;
         let mut parts: Vec<FormatPart> = Vec::new();
         while !cur_text.is_empty() {
-            // Try to parse both literals and bracketed format parts util we
+            // Try to parse both literals and bracketed format parts until we
             // run out of text
             cur_text = FormatString::parse_literal(cur_text)
                 .or_else(|_| FormatString::parse_spec(cur_text))

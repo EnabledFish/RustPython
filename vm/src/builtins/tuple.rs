@@ -1,14 +1,15 @@
 use super::{PositionIterInternal, PyGenericAlias, PyType, PyTypeRef};
+use crate::atomic_func;
 use crate::common::{hash::PyHash, lock::PyMutex};
 use crate::{
     class::PyClassImpl,
-    convert::{ToPyObject, TransmuteFromObject, TryFromBorrowedObject},
+    convert::{ToPyObject, TransmuteFromObject},
     function::{OptionalArg, PyArithmeticValue, PyComparisonValue},
+    iter::PyExactSizeIterator,
     protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
     recursion::ReprGuard,
-    sequence::{ObjectSequenceOp, SequenceOp},
+    sequence::{OptionalRangeArgs, SequenceExt},
     sliceable::{SequenceIndex, SliceableSequenceOp},
-    stdlib::sys,
     types::{
         AsMapping, AsSequence, Comparable, Constructor, Hashable, IterNext, IterNextIterable,
         Iterable, PyComparisonOp, Unconstructible,
@@ -19,10 +20,6 @@ use crate::{
 };
 use std::{fmt, marker::PhantomData};
 
-/// tuple() -> empty tuple
-/// tuple(iterable) -> tuple initialized from iterable's items
-///
-/// If the argument is a tuple, the return value is the same object.
 #[pyclass(module = false, name = "tuple")]
 pub struct PyTuple {
     elements: Box<[PyObjectRef]>,
@@ -172,7 +169,7 @@ impl PyTuple {
     }
 }
 
-#[pyimpl(
+#[pyclass(
     flags(BASETYPE),
     with(AsMapping, AsSequence, Hashable, Comparable, Iterable, Constructor)
 )]
@@ -262,11 +259,11 @@ impl PyTuple {
     }
 
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult {
-        match SequenceIndex::try_from_borrowed_object(vm, needle)? {
-            SequenceIndex::Int(i) => self.elements.get_item_by_index(vm, i),
+        match SequenceIndex::try_from_borrowed_object(vm, needle, "tuple")? {
+            SequenceIndex::Int(i) => self.elements.getitem_by_index(vm, i),
             SequenceIndex::Slice(slice) => self
                 .elements
-                .get_item_by_slice(vm, slice)
+                .getitem_by_slice(vm, slice)
                 .map(|x| vm.ctx.new_tuple(x).into()),
         }
     }
@@ -280,31 +277,11 @@ impl PyTuple {
     fn index(
         &self,
         needle: PyObjectRef,
-        start: OptionalArg<isize>,
-        stop: OptionalArg<isize>,
+        range: OptionalRangeArgs,
         vm: &VirtualMachine,
     ) -> PyResult<usize> {
-        let mut start = start.into_option().unwrap_or(0);
-        if start < 0 {
-            start += self.len() as isize;
-            if start < 0 {
-                start = 0;
-            }
-        }
-        let mut stop = stop.into_option().unwrap_or(sys::MAXSIZE);
-        if stop < 0 {
-            stop += self.len() as isize;
-            if stop < 0 {
-                stop = 0;
-            }
-        }
-        for (index, element) in self
-            .elements
-            .iter()
-            .enumerate()
-            .take(stop as usize)
-            .skip(start as usize)
-        {
+        let (start, stop) = range.saturate(self.len(), vm)?;
+        for (index, element) in self.elements.iter().enumerate().take(stop).skip(start) {
             if vm.identical_or_equal(element, &needle)? {
                 return Ok(index);
             }
@@ -346,40 +323,48 @@ impl PyTuple {
 }
 
 impl AsMapping for PyTuple {
-    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-        length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
-        subscript: Some(|mapping, needle, vm| Self::mapping_downcast(mapping)._getitem(needle, vm)),
-        ass_subscript: None,
-    };
+    fn as_mapping() -> &'static PyMappingMethods {
+        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+            length: atomic_func!(|mapping, _vm| Ok(PyTuple::mapping_downcast(mapping).len())),
+            subscript: atomic_func!(
+                |mapping, needle, vm| PyTuple::mapping_downcast(mapping)._getitem(needle, vm)
+            ),
+            ..PyMappingMethods::NOT_IMPLEMENTED
+        };
+        &AS_MAPPING
+    }
 }
 
 impl AsSequence for PyTuple {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
-        concat: Some(|seq, other, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            match Self::add(zelf.to_owned(), other.to_owned(), vm) {
-                PyArithmeticValue::Implemented(tuple) => Ok(tuple.into()),
-                PyArithmeticValue::NotImplemented => Err(vm.new_type_error(format!(
-                    "can only concatenate tuple (not '{}') to tuple",
-                    other.class().name()
-                ))),
-            }
-        }),
-        repeat: Some(|seq, n, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            Self::mul(zelf.to_owned(), n as isize, vm).map(|x| x.into())
-        }),
-        item: Some(|seq, i, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            zelf.elements.get_item_by_index(vm, i)
-        }),
-        contains: Some(|seq, needle, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            zelf._contains(needle, vm)
-        }),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+            length: atomic_func!(|seq, _vm| Ok(PyTuple::sequence_downcast(seq).len())),
+            concat: atomic_func!(|seq, other, vm| {
+                let zelf = PyTuple::sequence_downcast(seq);
+                match PyTuple::add(zelf.to_owned(), other.to_owned(), vm) {
+                    PyArithmeticValue::Implemented(tuple) => Ok(tuple.into()),
+                    PyArithmeticValue::NotImplemented => Err(vm.new_type_error(format!(
+                        "can only concatenate tuple (not '{}') to tuple",
+                        other.class().name()
+                    ))),
+                }
+            }),
+            repeat: atomic_func!(|seq, n, vm| {
+                let zelf = PyTuple::sequence_downcast(seq);
+                PyTuple::mul(zelf.to_owned(), n as isize, vm).map(|x| x.into())
+            }),
+            item: atomic_func!(|seq, i, vm| {
+                let zelf = PyTuple::sequence_downcast(seq);
+                zelf.elements.getitem_by_index(vm, i)
+            }),
+            contains: atomic_func!(|seq, needle, vm| {
+                let zelf = PyTuple::sequence_downcast(seq);
+                zelf._contains(needle, vm)
+            }),
+            ..PySequenceMethods::NOT_IMPLEMENTED
+        };
+        &AS_SEQUENCE
+    }
 }
 
 impl Hashable for PyTuple {
@@ -400,7 +385,9 @@ impl Comparable for PyTuple {
             return Ok(res.into());
         }
         let other = class_or_notimplemented!(Self, other);
-        zelf.cmp(vm, other, op).map(PyComparisonValue::Implemented)
+        zelf.iter()
+            .richcompare(other.iter(), op, vm)
+            .map(PyComparisonValue::Implemented)
     }
 }
 
@@ -425,7 +412,7 @@ impl PyPayload for PyTupleIterator {
     }
 }
 
-#[pyimpl(with(Constructor, IterNext))]
+#[pyclass(with(Constructor, IterNext))]
 impl PyTupleIterator {
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {

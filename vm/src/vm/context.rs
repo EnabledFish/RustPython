@@ -3,7 +3,11 @@ use crate::{
         builtinfunc::{PyBuiltinFunction, PyBuiltinMethod, PyNativeFuncDef},
         bytes,
         code::{self, PyCode},
-        getset::{IntoPyGetterFunc, IntoPySetterFunc, PyGetSet},
+        descriptor::{
+            DescrObject, MemberDef, MemberDescrObject, MemberGetter, MemberKind, MemberSetter,
+            MemberSetterFunc,
+        },
+        getset::PyGetSet,
         object, pystr,
         type_::PyAttributes,
         PyBaseException, PyBytes, PyComplex, PyDict, PyDictRef, PyEllipsis, PyFloat, PyFrozenSet,
@@ -13,14 +17,16 @@ use crate::{
     class::{PyClassImpl, StaticType},
     common::rc::PyRc,
     exceptions,
-    function::IntoPyNativeFunc,
+    function::{IntoPyGetterFunc, IntoPyNativeFunc, IntoPySetterFunc},
     intern::{Internable, MaybeInterned, StringPool},
     object::{Py, PyObjectPayload, PyObjectRef, PyPayload, PyRef},
     types::{PyTypeFlags, PyTypeSlots, TypeZoo},
+    PyResult, VirtualMachine,
 };
 use num_bigint::BigInt;
 use num_complex::Complex64;
 use num_traits::ToPrimitive;
+use rustpython_common::lock::PyRwLock;
 
 #[derive(Debug)]
 pub struct Context {
@@ -87,6 +93,7 @@ declare_const_name! {
     __ceil__,
     __cformat__,
     __class__,
+    __classcell__,
     __class_getitem__,
     __complex__,
     __contains__,
@@ -145,6 +152,7 @@ declare_const_name! {
     __lshift__,
     __lt__,
     __main__,
+    __match_args__,
     __matmul__,
     __missing__,
     __mod__,
@@ -190,6 +198,7 @@ declare_const_name! {
     __set_name__,
     __setattr__,
     __setitem__,
+    __slots__,
     __str__,
     __sub__,
     __subclasscheck__,
@@ -205,6 +214,7 @@ declare_const_name! {
     keys,
     items,
     values,
+    version,
     update,
     copy,
     flush,
@@ -327,7 +337,7 @@ impl Context {
     #[inline]
     pub fn new_int<T: Into<BigInt> + ToPrimitive>(&self, i: T) -> PyIntRef {
         if let Some(i) = i.to_i32() {
-            if i >= Self::INT_CACHE_POOL_MIN && i <= Self::INT_CACHE_POOL_MAX {
+            if (Self::INT_CACHE_POOL_MIN..=Self::INT_CACHE_POOL_MAX).contains(&i) {
                 let inner_idx = (i - Self::INT_CACHE_POOL_MIN) as usize;
                 return self.int_cache_pool[inner_idx].clone();
             }
@@ -338,7 +348,7 @@ impl Context {
     #[inline]
     pub fn new_bigint(&self, i: &BigInt) -> PyIntRef {
         if let Some(i) = i.to_i32() {
-            if i >= Self::INT_CACHE_POOL_MIN && i <= Self::INT_CACHE_POOL_MAX {
+            if (Self::INT_CACHE_POOL_MIN..=Self::INT_CACHE_POOL_MAX).contains(&i) {
                 let inner_idx = (i - Self::INT_CACHE_POOL_MIN) as usize;
                 return self.int_cache_pool[inner_idx].clone();
             }
@@ -412,6 +422,7 @@ impl Context {
             attrs,
             slots,
             self.types.type_type.to_owned(),
+            self,
         )
         .unwrap()
     }
@@ -436,6 +447,7 @@ impl Context {
             attrs,
             PyBaseException::make_slots(),
             self.types.type_type.to_owned(),
+            self,
         )
         .unwrap()
     }
@@ -446,6 +458,38 @@ impl Context {
         F: IntoPyNativeFunc<FKind>,
     {
         PyNativeFuncDef::new(f.into_func(), PyStr::new_ref(name, self))
+    }
+
+    #[inline]
+    pub fn new_member(
+        &self,
+        name: &str,
+        member_kind: MemberKind,
+        getter: fn(&VirtualMachine, PyObjectRef) -> PyResult,
+        setter: MemberSetterFunc,
+        class: &'static Py<PyType>,
+    ) -> PyRef<MemberDescrObject> {
+        let member_def = MemberDef {
+            name: name.to_owned(),
+            kind: member_kind,
+            getter: MemberGetter::Getter(getter),
+            setter: MemberSetter::Setter(setter),
+            doc: None,
+        };
+        let member_descriptor = MemberDescrObject {
+            common: DescrObject {
+                typ: class.to_owned(),
+                name: name.to_owned(),
+                qualname: PyRwLock::new(None),
+            },
+            member: member_def,
+        };
+
+        PyRef::new_ref(
+            member_descriptor,
+            self.types.member_descriptor_type.to_owned(),
+            None,
+        )
     }
 
     // #[deprecated]

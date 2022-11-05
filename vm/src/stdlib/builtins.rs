@@ -3,13 +3,8 @@
 //! Implements the list of [builtin Python functions](https://docs.python.org/3/library/builtins.html).
 use crate::{class::PyClassImpl, PyObjectRef, VirtualMachine};
 
-/// Built-in functions, exceptions, and other objects.
-///
-/// Noteworthy: None is the `nil' object; Ellipsis represents `...' in slices.
 #[pymodule]
 mod builtins {
-    #[cfg(feature = "rustpython-compiler")]
-    use crate::compile;
     use crate::{
         builtins::{
             asyncgenerator::PyAsyncGen,
@@ -18,26 +13,27 @@ mod builtins {
             int::PyIntRef,
             iter::PyCallableIterator,
             list::{PyList, SortOptions},
-            PyByteArray, PyBytes, PyBytesRef, PyCode, PyDictRef, PyStr, PyStrRef, PyTuple,
-            PyTupleRef, PyType,
+            PyByteArray, PyBytes, PyDictRef, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType,
         },
-        class::PyClassImpl,
         common::{hash::PyHash, str::to_ascii},
+        convert::ToPyException,
         format::call_object_format,
-        function::Either,
         function::{
-            ArgBytesLike, ArgCallable, ArgIntoBool, ArgIterable, ArgMapping, FuncArgs, KwArgs,
-            OptionalArg, OptionalOption, PosArgs, PyArithmeticValue,
+            ArgBytesLike, ArgCallable, ArgIntoBool, ArgIterable, ArgMapping, ArgStrOrBytesLike,
+            Either, FuncArgs, KwArgs, OptionalArg, OptionalOption, PosArgs, PyArithmeticValue,
         },
         protocol::{PyIter, PyIterReturn},
         py_io,
         readline::{Readline, ReadlineResult},
-        scope::Scope,
         stdlib::sys,
         types::PyComparisonOp,
         AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
     };
-    use num_traits::{Signed, ToPrimitive, Zero};
+    use num_traits::{Signed, ToPrimitive};
+
+    #[cfg(not(feature = "rustpython-compiler"))]
+    const CODEGEN_NOT_SUPPORTED: &str =
+        "can't compile() to bytecode when the `codegen` feature of rustpython is disabled";
 
     #[pyfunction]
     fn abs(x: PyObjectRef, vm: &VirtualMachine) -> PyResult {
@@ -81,8 +77,6 @@ mod builtins {
         }
     }
 
-    // builtin_breakpoint
-
     #[pyfunction]
     fn callable(obj: PyObjectRef, vm: &VirtualMachine) -> bool {
         vm.is_callable(&obj)
@@ -112,18 +106,20 @@ mod builtins {
         dont_inherit: OptionalArg<bool>,
         #[pyarg(any, optional)]
         optimize: OptionalArg<PyIntRef>,
+        #[pyarg(any, optional)]
+        _feature_version: OptionalArg<i32>,
     }
 
-    #[cfg(feature = "rustpython-compiler")]
+    #[cfg(any(feature = "rustpython-parser", feature = "rustpython-codegen"))]
     #[pyfunction]
     fn compile(args: CompileArgs, vm: &VirtualMachine) -> PyResult {
-        #[cfg(not(feature = "rustpython-ast"))]
-        {
-            Err(vm.new_value_error("can't use compile() when the `compiler` and `parser` features of rustpython are disabled".to_owned()))
-        }
         #[cfg(feature = "rustpython-ast")]
         {
-            use crate::stdlib::ast;
+            use crate::{class::PyClassImpl, stdlib::ast};
+
+            if args._feature_version.is_present() {
+                eprintln!("TODO: compile() got `_feature_version` but ignored");
+            }
 
             let mode_str = args.mode.as_str();
 
@@ -131,14 +127,14 @@ mod builtins {
                 .source
                 .fast_isinstance(&ast::AstNode::make_class(&vm.ctx))
             {
-                #[cfg(not(feature = "rustpython-compiler"))]
+                #[cfg(not(feature = "rustpython-codegen"))]
                 {
-                    return Err(vm.new_value_error("can't compile ast nodes when the `compiler` feature of rustpython is disabled"));
+                    return Err(vm.new_type_error(CODEGEN_NOT_SUPPORTED.to_owned()));
                 }
-                #[cfg(feature = "rustpython-compiler")]
+                #[cfg(feature = "rustpython-codegen")]
                 {
                     let mode = mode_str
-                        .parse::<compile::Mode>()
+                        .parse::<crate::compiler::Mode>()
                         .map_err(|err| vm.new_value_error(err.to_string()))?;
                     return ast::compile(vm, args.source, args.filename.as_str(), mode);
                 }
@@ -146,16 +142,18 @@ mod builtins {
 
             #[cfg(not(feature = "rustpython-parser"))]
             {
-                Err(vm.new_value_error(
-                    "can't compile() a string when the `parser` feature of rustpython is disabled",
-                ))
+                const PARSER_NOT_SUPPORTED: &str =
+        "can't compile() source code when the `parser` feature of rustpython is disabled";
+                Err(vm.new_type_error(PARSER_NOT_SUPPORTED.to_owned()))
             }
             #[cfg(feature = "rustpython-parser")]
             {
+                use crate::builtins::PyBytesRef;
+                use num_traits::Zero;
                 use rustpython_parser::parser;
 
                 let source = Either::<PyStrRef, PyBytesRef>::try_from_object(vm, args.source)?;
-                // TODO: compile::compile should probably get bytes
+                // TODO: compiler::compile should probably get bytes
                 let source = match &source {
                     Either::A(string) => string.as_str(),
                     Either::B(bytes) => std::str::from_utf8(bytes)
@@ -167,23 +165,23 @@ mod builtins {
                 if (flags & ast::PY_COMPILE_FLAG_AST_ONLY).is_zero() {
                     #[cfg(not(feature = "rustpython-compiler"))]
                     {
-                        Err(vm.new_value_error("can't compile() a string to bytecode when the `compiler` feature of rustpython is disabled".to_owned()))
+                        Err(vm.new_value_error(CODEGEN_NOT_SUPPORTED.to_owned()))
                     }
                     #[cfg(feature = "rustpython-compiler")]
                     {
                         let mode = mode_str
-                            .parse::<compile::Mode>()
+                            .parse::<crate::compiler::Mode>()
                             .map_err(|err| vm.new_value_error(err.to_string()))?;
                         let code = vm
                             .compile(source, mode, args.filename.as_str().to_owned())
-                            .map_err(|err| vm.new_syntax_error(&err))?;
+                            .map_err(|err| err.to_pyexception(vm))?;
                         Ok(code.into())
                     }
                 } else {
                     let mode = mode_str
                         .parse::<parser::Mode>()
                         .map_err(|err| vm.new_value_error(err.to_string()))?;
-                    ast::parse(vm, source, mode)
+                    ast::parse(vm, source, mode).map_err(|e| e.to_pyexception(vm))
                 }
             }
         }
@@ -204,7 +202,6 @@ mod builtins {
         vm._divmod(&a, &b)
     }
 
-    #[cfg(feature = "rustpython-compiler")]
     #[derive(FromArgs)]
     struct ScopeArgs {
         #[pyarg(any, default)]
@@ -213,9 +210,8 @@ mod builtins {
         locals: Option<ArgMapping>,
     }
 
-    #[cfg(feature = "rustpython-compiler")]
     impl ScopeArgs {
-        fn make_scope(self, vm: &VirtualMachine) -> PyResult<Scope> {
+        fn make_scope(self, vm: &VirtualMachine) -> PyResult<crate::scope::Scope> {
             let (globals, locals) = match self.globals {
                 Some(globals) => {
                     if !globals.contains_key(identifier!(vm, __builtins__), vm) {
@@ -239,50 +235,69 @@ mod builtins {
                 ),
             };
 
-            let scope = Scope::with_builtins(Some(locals), globals, vm);
+            let scope = crate::scope::Scope::with_builtins(Some(locals), globals, vm);
             Ok(scope)
         }
     }
 
-    /// Implements `eval`.
-    /// See also: https://docs.python.org/3/library/functions.html#eval
-    #[cfg(feature = "rustpython-compiler")]
     #[pyfunction]
     fn eval(
-        source: Either<PyStrRef, PyRef<PyCode>>,
+        source: Either<ArgStrOrBytesLike, PyRef<crate::builtins::PyCode>>,
         scope: ScopeArgs,
         vm: &VirtualMachine,
     ) -> PyResult {
-        run_code(vm, source, scope, compile::Mode::Eval, "eval")
+        // source as string
+        let code = match source {
+            Either::A(either) => {
+                let source: &[u8] = &either.borrow_bytes();
+                if source.contains(&0) {
+                    return Err(vm.new_value_error(
+                        "source code string cannot contain null bytes".to_owned(),
+                    ));
+                }
+
+                let source = std::str::from_utf8(source).map_err(|err| {
+                    let msg = format!(
+                        "(unicode error) 'utf-8' codec can't decode byte 0x{:x?} in position {}: invalid start byte",
+                        source[err.valid_up_to()],
+                        err.valid_up_to()
+                    );
+
+                    vm.new_exception_msg(vm.ctx.exceptions.syntax_error.to_owned(), msg)
+                })?;
+                Ok(Either::A(vm.ctx.new_str(source)))
+            }
+            Either::B(code) => Ok(Either::B(code)),
+        }?;
+        run_code(vm, code, scope, crate::compiler::Mode::Eval, "eval")
     }
 
-    /// Implements `exec`
-    /// https://docs.python.org/3/library/functions.html#exec
-    #[cfg(feature = "rustpython-compiler")]
     #[pyfunction]
     fn exec(
-        source: Either<PyStrRef, PyRef<PyCode>>,
+        source: Either<PyStrRef, PyRef<crate::builtins::PyCode>>,
         scope: ScopeArgs,
         vm: &VirtualMachine,
     ) -> PyResult {
-        run_code(vm, source, scope, compile::Mode::Exec, "exec")
+        run_code(vm, source, scope, crate::compiler::Mode::Exec, "exec")
     }
 
-    #[cfg(feature = "rustpython-compiler")]
     fn run_code(
         vm: &VirtualMachine,
-        source: Either<PyStrRef, PyRef<PyCode>>,
+        source: Either<PyStrRef, PyRef<crate::builtins::PyCode>>,
         scope: ScopeArgs,
-        mode: compile::Mode,
+        #[allow(unused_variables)] mode: crate::compiler::Mode,
         func: &str,
     ) -> PyResult {
         let scope = scope.make_scope(vm)?;
 
         // Determine code object:
         let code_obj = match source {
+            #[cfg(feature = "rustpython-compiler")]
             Either::A(string) => vm
                 .compile(string.as_str(), mode, "<string>".to_owned())
                 .map_err(|err| vm.new_syntax_error(&err))?,
+            #[cfg(not(feature = "rustpython-compiler"))]
+            Either::A(_) => return Err(vm.new_type_error(CODEGEN_NOT_SUPPORTED.to_owned())),
             Either::B(code_obj) => code_obj,
         };
 
@@ -339,7 +354,16 @@ mod builtins {
         obj.hash(vm)
     }
 
-    // builtin_help
+    #[pyfunction]
+    fn breakpoint(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        match vm
+            .sys_module
+            .get_attr(vm.ctx.intern_str("breakpointhook"), vm)
+        {
+            Ok(hook) => vm.invoke(hook.as_ref(), args),
+            Err(_) => Err(vm.new_runtime_error("lost sys.breakpointhook".to_owned())),
+        }
+    }
 
     #[pyfunction]
     fn hex(number: PyIntRef) -> String {
@@ -380,9 +404,6 @@ mod builtins {
                     Err(vm.new_exception_empty(vm.ctx.exceptions.keyboard_interrupt.to_owned()))
                 }
                 ReadlineResult::Io(e) => Err(vm.new_os_error(e.to_string())),
-                ReadlineResult::EncodingError => {
-                    Err(vm.new_unicode_decode_error("Error decoding readline input".to_owned()))
-                }
                 ReadlineResult::Other(e) => Err(vm.new_runtime_error(e.to_string())),
             }
         } else {
@@ -457,7 +478,7 @@ mod builtins {
             std::cmp::Ordering::Greater => {
                 if default.is_some() {
                     return Err(vm.new_type_error(format!(
-                        "Cannot specify a default for {} with multiple positional arguments",
+                        "Cannot specify a default for {}() with multiple positional arguments",
                         func_name
                     )));
                 }
@@ -466,7 +487,9 @@ mod builtins {
             std::cmp::Ordering::Equal => args.args[0].try_to_value(vm)?,
             std::cmp::Ordering::Less => {
                 // zero arguments means type error:
-                return Err(vm.new_type_error("Expected 1 or more arguments".to_owned()));
+                return Err(
+                    vm.new_type_error(format!("{} expected at least 1 argument, got 0", func_name))
+                );
             }
         };
 
@@ -475,7 +498,7 @@ mod builtins {
             Some(x) => x,
             None => {
                 return default.ok_or_else(|| {
-                    vm.new_value_error(format!("{} arg is an empty sequence", func_name))
+                    vm.new_value_error(format!("{}() arg is an empty sequence", func_name))
                 })
             }
         };
@@ -503,12 +526,12 @@ mod builtins {
 
     #[pyfunction]
     fn max(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        min_or_max(args, vm, "max()", PyComparisonOp::Gt)
+        min_or_max(args, vm, "max", PyComparisonOp::Gt)
     }
 
     #[pyfunction]
     fn min(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        min_or_max(args, vm, "min()", PyComparisonOp::Lt)
+        min_or_max(args, vm, "min", PyComparisonOp::Lt)
     }
 
     #[pyfunction]
@@ -614,13 +637,13 @@ mod builtins {
                     return val;
                 }
 
-                if !x.class().is(&y.class()) {
+                if !x.class().is(y.class()) {
                     if let Some(val) = try_pow_value(&y, (x.clone(), y.clone(), z.clone())) {
                         return val;
                     }
                 }
 
-                if !x.class().is(&z.class()) && !y.class().is(&z.class()) {
+                if !x.class().is(z.class()) && !y.class().is(z.class()) {
                     if let Some(val) = try_pow_value(&z, (x.clone(), y.clone(), z.clone())) {
                         return val;
                     }
@@ -720,7 +743,7 @@ mod builtins {
             })?;
         match ndigits.flatten() {
             Some(obj) => {
-                let ndigits = vm.to_index(&obj)?;
+                let ndigits = obj.try_index(vm)?;
                 meth.invoke((ndigits,), vm)
             }
             None => {
@@ -861,8 +884,8 @@ mod builtins {
                 for base in &bases {
                     let base_class = base.class();
                     if base_class.fast_issubclass(&metaclass) {
-                        metaclass = base.class().clone();
-                    } else if !metaclass.fast_issubclass(&base_class) {
+                        metaclass = base.class().to_owned();
+                    } else if !metaclass.fast_issubclass(base_class) {
                         return Err(vm.new_type_error(
                             "metaclass conflict: the metaclass of a derived class must be a (non-strict) \
                             subclass of the metaclasses of all its bases"
@@ -914,7 +937,19 @@ mod builtins {
         )?;
 
         if let Some(ref classcell) = classcell {
-            classcell.set(Some(class.clone()));
+            let classcell = classcell.get().ok_or_else(|| {
+                vm.new_type_error(format!(
+                    "__class__ not set defining {:?} as {:?}. Was __classcell__ propagated to type.__new__?",
+                    meta_name, class
+                ))
+            })?;
+
+            if !classcell.is(&class) {
+                return Err(vm.new_type_error(format!(
+                    "__class__ set to {:?} defining {:?} as {:?}",
+                    classcell, meta_name, class
+                )));
+            }
         }
 
         Ok(class)

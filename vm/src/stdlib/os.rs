@@ -349,7 +349,7 @@ impl<const AVAILABLE: usize> FromArgs for DirFd<AVAILABLE> {
             Some(o) if vm.is_none(&o) => DEFAULT_DIR_FD,
             None => DEFAULT_DIR_FD,
             Some(o) => {
-                let fd = vm.to_index_opt(o.clone()).unwrap_or_else(|| {
+                let fd = o.try_index_opt(vm).unwrap_or_else(|| {
                     Err(vm.new_type_error(format!(
                         "argument should be integer or None, not {}",
                         o.class().name()
@@ -701,14 +701,14 @@ pub(super) mod _os {
         ino: AtomicCell<Option<u64>>,
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl DirEntry {
-        #[pyproperty]
+        #[pygetset]
         fn name(&self, vm: &VirtualMachine) -> PyResult {
             self.mode.process_path(self.entry.file_name(), vm)
         }
 
-        #[pyproperty]
+        #[pygetset]
         fn path(&self, vm: &VirtualMachine) -> PyResult {
             self.mode.process_path(self.entry.path(), vm)
         }
@@ -870,7 +870,7 @@ pub(super) mod _os {
         mode: OutputMode,
     }
 
-    #[pyimpl(with(IterNext))]
+    #[pyclass(with(IterNext))]
     impl ScandirIterator {
         #[pymethod]
         fn close(&self) {
@@ -963,7 +963,7 @@ pub(super) mod _os {
         pub st_ctime_ns: i128,
     }
 
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl StatResult {
         fn from_stat(stat: &StatStruct, vm: &VirtualMachine) -> Self {
             let (atime, mtime, ctime);
@@ -1189,15 +1189,7 @@ pub(super) mod _os {
     }
 
     fn curdir_inner(vm: &VirtualMachine) -> PyResult<PathBuf> {
-        // getcwd (should) return FileNotFoundError if cwd is invalid; on wasi, we never have a
-        // valid cwd ;)
-        let res = if cfg!(target_os = "wasi") {
-            Err(io::ErrorKind::NotFound.into())
-        } else {
-            env::current_dir()
-        };
-
-        res.map_err(|err| err.into_pyexception(vm))
+        env::current_dir().map_err(|err| err.into_pyexception(vm))
     }
 
     #[pyfunction]
@@ -1364,8 +1356,8 @@ pub(super) mod _os {
                                     divmod.class().name()
                                 ))
                             })?;
-                    let secs = vm.to_index(&div)?.try_to_primitive(vm)?;
-                    let ns = vm.to_index(&rem)?.try_to_primitive(vm)?;
+                    let secs = div.try_index(vm)?.try_to_primitive(vm)?;
+                    let ns = rem.try_index(vm)?.try_to_primitive(vm)?;
                     Ok(Duration::new(secs, ns))
                 };
                 // TODO: do validation to make sure this doesn't.. underflow?
@@ -1487,7 +1479,7 @@ pub(super) mod _os {
     }
 
     #[cfg(all(any(unix, windows), not(target_os = "redox")))]
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl TimesResult {}
 
     #[cfg(all(any(unix, windows), not(target_os = "redox")))]
@@ -1706,7 +1698,7 @@ pub(super) mod _os {
         pub columns: usize,
         pub lines: usize,
     }
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl PyTerminalSize {}
 
     #[pyattr]
@@ -1720,7 +1712,7 @@ pub(super) mod _os {
         pub machine: String,
     }
 
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl UnameResult {}
 
     pub(super) fn support_funcs() -> Vec<SupportFunc> {

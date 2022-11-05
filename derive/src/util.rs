@@ -15,7 +15,7 @@ pub(crate) const ALL_ALLOWED_NAMES: &[&str] = &[
     "pymethod",
     "pyclassmethod",
     "pystaticmethod",
-    "pyproperty",
+    "pygetset",
     "pyfunction",
     "pyclass",
     "pyexception",
@@ -23,6 +23,7 @@ pub(crate) const ALL_ALLOWED_NAMES: &[&str] = &[
     "pyattr",
     "pyslot",
     "extend_class",
+    "pymember",
 ];
 
 #[derive(Clone)]
@@ -562,7 +563,7 @@ where
     match tree {
         UseTree::Name(name) => result.push(f(&name.ident, false)?),
         UseTree::Rename(rename) => result.push(f(&rename.rename, false)?),
-        UseTree::Path(path) => iter_use_tree_idents(&*path.tree, result, f)?,
+        UseTree::Path(path) => iter_use_tree_idents(&path.tree, result, f)?,
         UseTree::Group(syn::UseGroup { items, .. }) => {
             for subtree in items {
                 iter_use_tree_idents(subtree, result, f)?;

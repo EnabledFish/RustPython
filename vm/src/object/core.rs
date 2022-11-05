@@ -14,17 +14,19 @@
 use super::{
     ext::{AsObject, PyResult},
     payload::PyObjectPayload,
-};
-use crate::common::{
-    atomic::{OncePtr, PyAtomic, Radium},
-    linked_list::{Link, LinkedList, Pointers},
-    lock::{PyMutex, PyMutexGuard, PyRwLock},
-    refcount::RefCount,
+    PyAtomicRef,
 };
 use crate::{
-    builtins::{PyDictRef, PyTypeRef},
+    builtins::{PyDictRef, PyType, PyTypeRef},
+    common::{
+        atomic::{OncePtr, PyAtomic, Radium},
+        linked_list::{Link, LinkedList, Pointers},
+        lock::{PyMutex, PyMutexGuard, PyRwLock},
+        refcount::RefCount,
+    },
     vm::VirtualMachine,
 };
+use itertools::Itertools;
 use std::{
     any::TypeId,
     borrow::Borrow,
@@ -70,6 +72,7 @@ use std::{
 // concrete type to work with before we ever access the `payload` field**
 
 /// A type to just represent "we've erased the type of this object, cast it before you use it"
+#[derive(Debug)]
 struct Erased;
 
 struct PyObjVTable {
@@ -77,7 +80,7 @@ struct PyObjVTable {
     debug: unsafe fn(&PyObject, &mut fmt::Formatter) -> fmt::Result,
 }
 unsafe fn drop_dealloc_obj<T: PyObjectPayload>(x: *mut PyObject) {
-    Box::from_raw(x as *mut PyInner<T>);
+    drop(Box::from_raw(x as *mut PyInner<T>));
 }
 unsafe fn debug_obj<T: PyObjectPayload>(x: &PyObject, f: &mut fmt::Formatter) -> fmt::Result {
     let x = &*(x as *const PyObject as *const PyInner<T>);
@@ -110,9 +113,10 @@ struct PyInner<T> {
     typeid: TypeId,
     vtable: &'static PyObjVTable,
 
-    typ: PyRwLock<PyTypeRef>, // __class__ member
+    typ: PyAtomicRef<PyType>, // __class__ member
     dict: Option<InstanceDict>,
     weak_list: WeakRefList,
+    slots: Box<[PyRwLock<Option<PyObjectRef>>]>,
 
     payload: T,
 }
@@ -251,7 +255,7 @@ impl WeakRefList {
                 })
             }
             inner.ref_count -= 1;
-            (inner.ref_count == 0).then(|| ptr)
+            (inner.ref_count == 0).then_some(ptr)
         };
         if let Some(ptr) = to_dealloc {
             unsafe { WeakRefList::dealloc(ptr) }
@@ -267,7 +271,7 @@ impl WeakRefList {
     }
 
     unsafe fn dealloc(ptr: NonNull<PyMutex<WeakListInner>>) {
-        Box::from_raw(ptr.as_ptr());
+        drop(Box::from_raw(ptr.as_ptr()));
     }
 
     fn get_weak_references(&self) -> Vec<PyRef<PyWeak>> {
@@ -426,14 +430,19 @@ impl InstanceDict {
 
 impl<T: PyObjectPayload> PyInner<T> {
     fn new(payload: T, typ: PyTypeRef, dict: Option<PyDictRef>) -> Box<Self> {
+        let member_count = typ.slots.member_count;
         Box::new(PyInner {
             ref_count: RefCount::new(),
             typeid: TypeId::of::<T>(),
             vtable: PyObjVTable::of::<T>(),
-            typ: PyRwLock::new(typ),
+            typ: PyAtomicRef::from(typ),
             dict: dict.map(InstanceDict::new),
             weak_list: WeakRefList::new(),
             payload,
+            slots: std::iter::repeat_with(|| PyRwLock::new(None))
+                .take(member_count)
+                .collect_vec()
+                .into_boxed_slice(),
         })
     }
 }
@@ -462,6 +471,7 @@ cfg_if::cfg_if! {
     }
 }
 
+#[derive(Debug)]
 #[repr(transparent)]
 pub struct PyObject(PyInner<Erased>);
 
@@ -641,8 +651,12 @@ impl PyObject {
     }
 
     #[inline(always)]
-    pub(crate) fn class_lock(&self) -> &PyRwLock<PyTypeRef> {
-        &self.0.typ
+    pub fn class(&self) -> &Py<PyType> {
+        self.0.typ.deref()
+    }
+
+    pub fn set_class(&self, typ: PyTypeRef, vm: &VirtualMachine) {
+        self.0.typ.swap_to_temporary_refs(typ, vm);
     }
 
     #[inline(always)]
@@ -762,7 +776,8 @@ impl PyObject {
         }
 
         // CPython-compatible drop implementation
-        if let Some(slot_del) = self.class().mro_find_map(|cls| cls.slots.del.load()) {
+        let del = self.class().mro_find_map(|cls| cls.slots.del.load());
+        if let Some(slot_del) = del {
             call_slot_del(self, slot_del)?;
         }
         if let Some(wrl) = self.weak_ref_list() {
@@ -792,6 +807,14 @@ impl PyObject {
 
     pub(crate) fn is_interned(&self) -> bool {
         self.0.ref_count.is_leaked()
+    }
+
+    pub(crate) fn get_slot(&self, offset: usize) -> Option<PyObjectRef> {
+        self.0.slots[offset].read().clone()
+    }
+
+    pub(crate) fn set_slot(&self, offset: usize, value: Option<PyObjectRef>) {
+        *self.0.slots[offset].write() = value;
     }
 }
 
@@ -836,7 +859,7 @@ impl fmt::Debug for PyObjectRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // SAFETY: the vtable contains functions that accept payload types that always match up
         // with the payload of the object
-        unsafe { ((*self).0.vtable.debug)(self, f) }
+        unsafe { (self.0.vtable.debug)(self, f) }
     }
 }
 
@@ -945,7 +968,7 @@ impl<T: PyObjectPayload> Clone for PyRef<T> {
 
 impl<T: PyObjectPayload> PyRef<T> {
     #[inline(always)]
-    unsafe fn from_raw(raw: *const Py<T>) -> Self {
+    pub(crate) unsafe fn from_raw(raw: *const Py<T>) -> Self {
         Self {
             ptr: NonNull::new_unchecked(raw as *mut _),
         }
@@ -1079,10 +1102,7 @@ macro_rules! partially_init {
 }
 
 pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
-    use crate::{
-        builtins::{object, PyType},
-        class::PyClassImpl,
-    };
+    use crate::{builtins::object, class::PyClassImpl};
     use std::mem::MaybeUninit;
 
     // `type` inherits from `object`
@@ -1090,8 +1110,6 @@ pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
     // to produce this circular dependency, we need an unsafe block.
     // (and yes, this will never get dropped. TODO?)
     let (type_type, object_type) = {
-        type UninitRef<T> = PyRwLock<NonNull<PyInner<T>>>;
-
         // We cast between these 2 types, so make sure (at compile time) that there's no change in
         // layout when we wrap PyInner<PyTypeObj> in MaybeUninit<>
         static_assertions::assert_eq_size!(MaybeUninit<PyInner<PyType>>, PyInner<PyType>);
@@ -1104,6 +1122,7 @@ pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
             subclasses: PyRwLock::default(),
             attributes: PyRwLock::new(Default::default()),
             slots: PyType::make_slots(),
+            heaptype_ext: None,
         };
         let object_payload = PyType {
             base: None,
@@ -1112,6 +1131,7 @@ pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
             subclasses: PyRwLock::default(),
             attributes: PyRwLock::new(Default::default()),
             slots: object::PyBaseObject::make_slots(),
+            heaptype_ext: None,
         };
         let type_type_ptr = Box::into_raw(Box::new(partially_init!(
             PyInner::<PyType> {
@@ -1121,6 +1141,7 @@ pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
                 dict: None,
                 weak_list: WeakRefList::new(),
                 payload: type_payload,
+                slots: Box::new([]),
             },
             Uninit { typ }
         )));
@@ -1132,6 +1153,7 @@ pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
                 dict: None,
                 weak_list: WeakRefList::new(),
                 payload: object_payload,
+                slots: Box::new([]),
             },
             Uninit { typ },
         )));
@@ -1143,15 +1165,11 @@ pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
 
         unsafe {
             (*type_type_ptr).ref_count.inc();
-            ptr::write(
-                &mut (*object_type_ptr).typ as *mut PyRwLock<PyTypeRef> as *mut UninitRef<PyType>,
-                PyRwLock::new(NonNull::new_unchecked(type_type_ptr)),
-            );
+            let type_type = PyTypeRef::from_raw(type_type_ptr.cast());
+            ptr::write(&mut (*object_type_ptr).typ, PyAtomicRef::from(type_type));
             (*type_type_ptr).ref_count.inc();
-            ptr::write(
-                &mut (*type_type_ptr).typ as *mut PyRwLock<PyTypeRef> as *mut UninitRef<PyType>,
-                PyRwLock::new(NonNull::new_unchecked(type_type_ptr)),
-            );
+            let type_type = PyTypeRef::from_raw(type_type_ptr.cast());
+            ptr::write(&mut (*type_type_ptr).typ, PyAtomicRef::from(type_type));
 
             let object_type = PyTypeRef::from_raw(object_type_ptr.cast());
 
@@ -1172,6 +1190,7 @@ pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
         subclasses: PyRwLock::default(),
         attributes: PyRwLock::default(),
         slots: PyWeak::make_slots(),
+        heaptype_ext: None,
     };
     let weakref_type = PyRef::new_ref(weakref_type, type_type.clone(), None);
 

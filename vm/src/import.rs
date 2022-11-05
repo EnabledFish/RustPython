@@ -1,8 +1,6 @@
 /*
  * Import mechanics
  */
-#[cfg(feature = "rustpython-compiler")]
-use crate::compile;
 use crate::{
     builtins::{list, traceback::PyTraceback, PyBaseExceptionRef, PyCode},
     scope::Scope,
@@ -11,17 +9,6 @@ use crate::{
     AsObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
 };
 use rand::Rng;
-
-pub(crate) fn init_importlib(
-    vm: &mut VirtualMachine,
-    allow_external_library: bool,
-) -> PyResult<()> {
-    let importlib = init_importlib_base(vm)?;
-    if allow_external_library && cfg!(feature = "rustpython-compiler") {
-        init_importlib_package(vm, importlib)?;
-    }
-    Ok(())
-}
 
 pub(crate) fn init_importlib_base(vm: &mut VirtualMachine) -> PyResult<PyObjectRef> {
     flame_guard!("init importlib");
@@ -122,7 +109,12 @@ pub fn import_file(
     content: String,
 ) -> PyResult {
     let code = vm
-        .compile_with_opts(&content, compile::Mode::Exec, file_path, vm.compile_opts())
+        .compile_with_opts(
+            &content,
+            crate::compiler::Mode::Exec,
+            file_path,
+            vm.compile_opts(),
+        )
         .map_err(|err| vm.new_syntax_error(&err))?;
     import_codeobj(vm, module_name, code, true)
 }
@@ -153,7 +145,8 @@ pub fn import_codeobj(
     sys_modules.set_item(module_name, module.clone(), vm)?;
 
     // Execute main code in module:
-    vm.run_code_obj(code_obj, Scope::with_builtins(None, attrs, vm))?;
+    let scope = Scope::with_builtins(None, attrs, vm);
+    vm.run_code_obj(code_obj, scope)?;
     Ok(module)
 }
 
@@ -171,7 +164,7 @@ fn remove_importlib_frames_inner(
     let file_name = traceback.frame.code.source_path.as_str();
 
     let (inner_tb, mut now_in_importlib) =
-        remove_importlib_frames_inner(vm, traceback.next.clone(), always_trim);
+        remove_importlib_frames_inner(vm, traceback.next.lock().clone(), always_trim);
     if file_name == "_frozen_importlib" || file_name == "_frozen_importlib_external" {
         if traceback.frame.code.obj_name.as_str() == "_call_with_frames_removed" {
             now_in_importlib = true;

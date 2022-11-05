@@ -5,6 +5,7 @@ pub(crate) use _winapi::make_module;
 mod _winapi {
     use crate::{
         builtins::PyStrRef,
+        common::windows::ToWideString,
         convert::ToPyException,
         function::{ArgMapping, ArgSequence, OptionalArg},
         stdlib::os::errno_err,
@@ -16,22 +17,47 @@ mod _winapi {
         fileapi, handleapi, namedpipeapi, processenv, processthreadsapi, synchapi, winbase,
         winnt::HANDLE,
     };
+    use windows::{
+        core::PCWSTR,
+        Win32::Foundation::{HINSTANCE, MAX_PATH},
+        Win32::System::LibraryLoader::{GetModuleFileNameW, LoadLibraryW},
+    };
 
     #[pyattr]
     use winapi::{
-        shared::winerror::WAIT_TIMEOUT,
+        shared::winerror::{
+            ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_MORE_DATA,
+            ERROR_NETNAME_DELETED, ERROR_NO_DATA, ERROR_NO_SYSTEM_RESOURCES,
+            ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_SEM_TIMEOUT,
+            WAIT_TIMEOUT,
+        },
         um::{
+            fileapi::OPEN_EXISTING,
+            memoryapi::{
+                FILE_MAP_ALL_ACCESS, FILE_MAP_COPY, FILE_MAP_EXECUTE, FILE_MAP_READ, FILE_MAP_WRITE,
+            },
+            minwinbase::STILL_ACTIVE,
             winbase::{
                 ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS,
                 CREATE_BREAKAWAY_FROM_JOB, CREATE_DEFAULT_ERROR_MODE, CREATE_NEW_CONSOLE,
-                CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS, FILE_TYPE_CHAR,
+                CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+                FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_TYPE_CHAR,
                 FILE_TYPE_DISK, FILE_TYPE_PIPE, FILE_TYPE_REMOTE, FILE_TYPE_UNKNOWN,
                 HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, INFINITE, NORMAL_PRIORITY_CLASS,
-                REALTIME_PRIORITY_CLASS, STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES,
-                STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, WAIT_ABANDONED,
-                WAIT_ABANDONED_0, WAIT_OBJECT_0,
+                PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND, PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE,
+                PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, REALTIME_PRIORITY_CLASS, STARTF_USESHOWWINDOW,
+                STARTF_USESTDHANDLES, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+                WAIT_ABANDONED, WAIT_ABANDONED_0, WAIT_OBJECT_0,
             },
-            winnt::DUPLICATE_SAME_ACCESS,
+            winnt::{
+                DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, FILE_GENERIC_READ,
+                FILE_GENERIC_WRITE, GENERIC_READ, GENERIC_WRITE, LOCALE_NAME_MAX_LENGTH,
+                MEM_COMMIT, MEM_FREE, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, MEM_RESERVE,
+                PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
+                PAGE_GUARD, PAGE_NOACCESS, PAGE_NOCACHE, PAGE_READONLY, PAGE_READWRITE,
+                PAGE_WRITECOMBINE, PAGE_WRITECOPY, PROCESS_DUP_HANDLE, SEC_COMMIT, SEC_IMAGE,
+                SEC_LARGE_PAGES, SEC_NOCACHE, SEC_RESERVE, SEC_WRITECOMBINE, SYNCHRONIZE,
+            },
             winuser::SW_HIDE,
         },
     };
@@ -381,5 +407,30 @@ mod _winapi {
             processthreadsapi::TerminateProcess(h as _, exit_code)
         })
         .map(drop)
+    }
+
+    // TODO: ctypes.LibraryLoader.LoadLibrary
+    #[allow(dead_code)]
+    fn LoadLibrary(path: PyStrRef, vm: &VirtualMachine) -> PyResult<isize> {
+        let path = path.as_str().to_wides_with_nul();
+        let handle = unsafe { LoadLibraryW(PCWSTR::from_raw(path.as_ptr())).unwrap() };
+        if handle.is_invalid() {
+            return Err(vm.new_runtime_error("LoadLibrary failed".to_owned()));
+        }
+        Ok(handle.0)
+    }
+
+    #[pyfunction]
+    fn GetModuleFileName(handle: isize, vm: &VirtualMachine) -> PyResult<String> {
+        let mut path: Vec<u16> = vec![0; MAX_PATH as usize];
+        let handle = HINSTANCE(handle);
+
+        let length = unsafe { GetModuleFileNameW(handle, &mut path) };
+        if length == 0 {
+            return Err(vm.new_runtime_error("GetModuleFileName failed".to_owned()));
+        }
+
+        let (path, _) = path.split_at(length as usize);
+        Ok(String::from_utf16(path).unwrap())
     }
 }

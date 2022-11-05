@@ -3,6 +3,7 @@ use crate::{
     stdlib::{atexit, sys},
     PyResult,
 };
+use std::sync::atomic::Ordering;
 
 /// The general interface for the VM
 ///
@@ -10,7 +11,7 @@ use crate::{
 /// Runs a simple embedded hello world program.
 /// ```
 /// use rustpython_vm::Interpreter;
-/// use rustpython_vm::compile::Mode;
+/// use rustpython_vm::compiler::Mode;
 /// Interpreter::without_stdlib(Default::default()).enter(|vm| {
 ///     let scope = vm.new_scope_with_builtins();
 ///     let code_obj = vm.compile(r#"print("Hello World!")"#,
@@ -58,7 +59,7 @@ impl Interpreter {
         thread::enter_vm(&self.vm, || f(&self.vm))
     }
 
-    pub fn run<F, R>(self, f: F) -> i32
+    pub fn run<F, R>(self, f: F) -> u8
     where
         F: FnOnce(&VirtualMachine) -> PyResult<R>,
     {
@@ -73,6 +74,8 @@ impl Interpreter {
                 .unwrap_or_else(|code| code);
 
             atexit::_run_exitfuncs(vm);
+
+            vm.state.finalizing.store(true, Ordering::Release);
 
             flush_std(vm);
 

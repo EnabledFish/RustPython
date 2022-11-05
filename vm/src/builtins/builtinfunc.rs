@@ -56,11 +56,7 @@ impl PyNativeFuncDef {
         class: &'static Py<PyType>,
     ) -> PyRef<PyStaticMethod> {
         let callable = self.build_method(ctx, class).into();
-        PyRef::new_ref(
-            PyStaticMethod { callable },
-            ctx.types.staticmethod_type.to_owned(),
-            None,
-        )
+        PyStaticMethod::new_ref(callable, ctx)
     }
 }
 
@@ -118,25 +114,25 @@ impl Callable for PyBuiltinFunction {
     }
 }
 
-#[pyimpl(with(Callable, Constructor), flags(HAS_DICT))]
+#[pyclass(with(Callable, Constructor), flags(HAS_DICT))]
 impl PyBuiltinFunction {
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn module(&self, vm: &VirtualMachine) -> PyObjectRef {
         vm.unwrap_or_none(self.module.clone())
     }
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn name(&self) -> PyStrRef {
         self.value.name.clone()
     }
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn qualname(&self) -> PyStrRef {
         self.name()
     }
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn doc(&self) -> Option<PyStrRef> {
         self.value.doc.clone()
     }
-    #[pyproperty(name = "__self__")]
+    #[pygetset(name = "__self__")]
     fn get_self(&self, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.none()
     }
@@ -153,7 +149,7 @@ impl PyBuiltinFunction {
     fn repr(&self) -> String {
         format!("<built-in function {}>", self.value.name)
     }
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn text_signature(&self) -> Option<String> {
         self.value.doc.as_ref().and_then(|doc| {
             type_::get_text_signature_from_internal_doc(self.value.name.as_str(), doc.as_str())
@@ -198,7 +194,7 @@ impl GetDescriptor for PyBuiltinMethod {
             Ok(obj) => obj,
             Err(result) => return result,
         };
-        let r = if vm.is_none(&obj) && !Self::_cls_is(&cls, &obj.class()) {
+        let r = if vm.is_none(&obj) && !Self::_cls_is(&cls, obj.class()) {
             zelf.into()
         } else {
             PyBoundMethod::new_ref(obj, zelf.into(), &vm.ctx).into()
@@ -229,21 +225,21 @@ impl PyBuiltinMethod {
     }
 }
 
-#[pyimpl(with(GetDescriptor, Callable, Constructor), flags(METHOD_DESCR))]
+#[pyclass(with(GetDescriptor, Callable, Constructor), flags(METHOD_DESCR))]
 impl PyBuiltinMethod {
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn name(&self) -> PyStrRef {
         self.value.name.clone()
     }
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn qualname(&self) -> String {
         format!("{}.{}", self.class.name(), &self.value.name)
     }
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn doc(&self) -> Option<PyStrRef> {
         self.value.doc.clone()
     }
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn text_signature(&self) -> Option<String> {
         self.value.doc.as_ref().and_then(|doc| {
             type_::get_text_signature_from_internal_doc(self.value.name.as_str(), doc.as_str())
@@ -257,6 +253,15 @@ impl PyBuiltinMethod {
             &self.value.name,
             self.class.name()
         )
+    }
+    #[pymethod(magic)]
+    fn reduce(
+        &self,
+        vm: &VirtualMachine,
+    ) -> (Option<PyObjectRef>, (Option<PyObjectRef>, PyStrRef)) {
+        let builtinfunc_getattr = vm.builtins.get_attr("getattr", vm).ok();
+        let classname = vm.builtins.get_attr(self.class.name().to_string(), vm).ok();
+        (builtinfunc_getattr, (classname, self.value.name.clone()))
     }
 }
 impl Unconstructible for PyBuiltinMethod {}

@@ -2,42 +2,41 @@ pub(crate) use decl::make_module;
 
 #[pymodule(name = "itertools")]
 mod decl {
-    use crate::common::{
-        lock::{PyMutex, PyRwLock, PyRwLockWriteGuard},
-        rc::PyRc,
-    };
     use crate::{
-        builtins::{int, PyGenericAlias, PyInt, PyIntRef, PyTuple, PyTupleRef, PyTypeRef},
+        builtins::{int, PyGenericAlias, PyInt, PyIntRef, PyList, PyTuple, PyTupleRef, PyTypeRef},
+        common::{
+            lock::{PyMutex, PyRwLock, PyRwLockWriteGuard},
+            rc::PyRc,
+        },
         convert::ToPyObject,
-        function::{ArgCallable, FuncArgs, OptionalArg, OptionalOption, PosArgs},
+        function::{ArgCallable, ArgIntoBool, FuncArgs, OptionalArg, OptionalOption, PosArgs},
         identifier,
-        protocol::{PyIter, PyIterReturn},
+        protocol::{PyIter, PyIterReturn, PyNumber},
         stdlib::sys,
         types::{Constructor, IterNext, IterNextIterable},
-        AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, PyWeakRef, VirtualMachine,
+        AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, PyWeakRef, TryFromObject,
+        VirtualMachine,
     };
     use crossbeam_utils::atomic::AtomicCell;
-    use num_bigint::BigInt;
-    use num_traits::{One, Signed, ToPrimitive, Zero};
+    use num_traits::{Signed, ToPrimitive};
     use std::fmt;
 
     #[pyattr]
     #[pyclass(name = "chain")]
     #[derive(Debug, PyPayload)]
     struct PyItertoolsChain {
-        iterables: Vec<PyObjectRef>,
-        cur_idx: AtomicCell<usize>,
-        cached_iter: PyRwLock<Option<PyIter>>,
+        source: PyRwLock<Option<PyIter>>,
+        active: PyRwLock<Option<PyIter>>,
     }
 
-    #[pyimpl(with(IterNext))]
+    #[pyclass(with(IterNext), flags(BASETYPE, HAS_DICT))]
     impl PyItertoolsChain {
         #[pyslot]
         fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+            let args_list = PyList::from(args.args);
             PyItertoolsChain {
-                iterables: args.args,
-                cur_idx: AtomicCell::new(0),
-                cached_iter: PyRwLock::new(None),
+                source: PyRwLock::new(Some(args_list.to_pyobject(vm).get_iter(vm)?)),
+                active: PyRwLock::new(None),
             }
             .into_ref_with_type(vm, cls)
             .map(Into::into)
@@ -46,13 +45,12 @@ mod decl {
         #[pyclassmethod]
         fn from_iterable(
             cls: PyTypeRef,
-            iterable: PyObjectRef,
+            source: PyObjectRef,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Self>> {
             PyItertoolsChain {
-                iterables: iterable.try_to_value(vm)?,
-                cur_idx: AtomicCell::new(0),
-                cached_iter: PyRwLock::new(None),
+                source: PyRwLock::new(Some(source.get_iter(vm)?)),
+                active: PyRwLock::new(None),
             }
             .into_ref_with_type(vm, cls)
         }
@@ -61,41 +59,102 @@ mod decl {
         fn class_getitem(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
             PyGenericAlias::new(cls, args, vm)
         }
+
+        #[pymethod(magic)]
+        fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            let source = zelf.source.read().clone();
+            let active = zelf.active.read().clone();
+            let cls = zelf.class().to_owned();
+            let empty_tuple = vm.ctx.empty_tuple.clone();
+            let reduced = match source {
+                Some(source) => match active {
+                    Some(active) => vm.new_tuple((cls, empty_tuple, (source, active))),
+                    None => vm.new_tuple((cls, empty_tuple, (source,))),
+                },
+                None => vm.new_tuple((cls, empty_tuple)),
+            };
+            Ok(reduced)
+        }
+
+        #[pymethod(magic)]
+        fn setstate(zelf: PyRef<Self>, state: PyTupleRef, vm: &VirtualMachine) -> PyResult<()> {
+            let args = state.as_slice();
+            if args.is_empty() {
+                let msg = String::from("function takes at leat 1 arguments (0 given)");
+                return Err(vm.new_type_error(msg));
+            }
+            if args.len() > 2 {
+                let msg = format!("function takes at most 2 arguments ({} given)", args.len());
+                return Err(vm.new_type_error(msg));
+            }
+            let source = &args[0];
+            if args.len() == 1 {
+                if !PyIter::check(source.as_ref()) {
+                    return Err(vm.new_type_error(String::from("Arguments must be iterators.")));
+                }
+                *zelf.source.write() = source.to_owned().try_into_value(vm)?;
+                return Ok(());
+            }
+            let active = &args[1];
+
+            if !PyIter::check(source.as_ref()) || !PyIter::check(active.as_ref()) {
+                return Err(vm.new_type_error(String::from("Arguments must be iterators.")));
+            }
+            let mut source_lock = zelf.source.write();
+            let mut active_lock = zelf.active.write();
+            *source_lock = source.to_owned().try_into_value(vm)?;
+            *active_lock = active.to_owned().try_into_value(vm)?;
+            Ok(())
+        }
     }
     impl IterNextIterable for PyItertoolsChain {}
     impl IterNext for PyItertoolsChain {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-            loop {
-                let pos = zelf.cur_idx.load();
-                if pos >= zelf.iterables.len() {
-                    break;
-                }
-                let cur_iter = if zelf.cached_iter.read().is_none() {
-                    // We need to call "get_iter" outside of the lock.
-                    let iter = zelf.iterables[pos].clone().get_iter(vm)?;
-                    *zelf.cached_iter.write() = Some(iter.clone());
-                    iter
-                } else if let Some(cached_iter) = (*zelf.cached_iter.read()).clone() {
-                    cached_iter
+            let source = if let Some(source) = zelf.source.read().clone() {
+                source
+            } else {
+                return Ok(PyIterReturn::StopIteration(None));
+            };
+            let next = loop {
+                let maybe_active = zelf.active.read().clone();
+                if let Some(active) = maybe_active {
+                    match active.next(vm) {
+                        Ok(PyIterReturn::Return(ok)) => {
+                            break Ok(PyIterReturn::Return(ok));
+                        }
+                        Ok(PyIterReturn::StopIteration(_)) => {
+                            *zelf.active.write() = None;
+                        }
+                        Err(err) => {
+                            break Err(err);
+                        }
+                    }
                 } else {
-                    // Someone changed cached iter to None since we checked.
-                    continue;
-                };
-
-                // We need to call "next" outside of the lock.
-                match cur_iter.next(vm) {
-                    Ok(PyIterReturn::Return(ok)) => return Ok(PyIterReturn::Return(ok)),
-                    Ok(PyIterReturn::StopIteration(_)) => {
-                        zelf.cur_idx.fetch_add(1);
-                        *zelf.cached_iter.write() = None;
-                    }
-                    Err(err) => {
-                        return Err(err);
+                    match source.next(vm) {
+                        Ok(PyIterReturn::Return(ok)) => match ok.get_iter(vm) {
+                            Ok(iter) => {
+                                *zelf.active.write() = Some(iter);
+                            }
+                            Err(err) => {
+                                break Err(err);
+                            }
+                        },
+                        Ok(PyIterReturn::StopIteration(_)) => {
+                            break Ok(PyIterReturn::StopIteration(None));
+                        }
+                        Err(err) => {
+                            break Err(err);
+                        }
                     }
                 }
-            }
-
-            Ok(PyIterReturn::StopIteration(None))
+            };
+            match next {
+                Err(_) | Ok(PyIterReturn::StopIteration(_)) => {
+                    *zelf.source.write() = None;
+                }
+                _ => {}
+            };
+            next
         }
     }
 
@@ -104,15 +163,15 @@ mod decl {
     #[derive(Debug, PyPayload)]
     struct PyItertoolsCompress {
         data: PyIter,
-        selector: PyIter,
+        selectors: PyIter,
     }
 
     #[derive(FromArgs)]
     struct CompressNewArgs {
-        #[pyarg(positional)]
+        #[pyarg(any)]
         data: PyIter,
-        #[pyarg(positional)]
-        selector: PyIter,
+        #[pyarg(any)]
+        selectors: PyIter,
     }
 
     impl Constructor for PyItertoolsCompress {
@@ -120,23 +179,31 @@ mod decl {
 
         fn py_new(
             cls: PyTypeRef,
-            Self::Args { data, selector }: Self::Args,
+            Self::Args { data, selectors }: Self::Args,
             vm: &VirtualMachine,
         ) -> PyResult {
-            PyItertoolsCompress { data, selector }
+            PyItertoolsCompress { data, selectors }
                 .into_ref_with_type(vm, cls)
                 .map(Into::into)
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
-    impl PyItertoolsCompress {}
+    #[pyclass(with(IterNext, Constructor), flags(BASETYPE))]
+    impl PyItertoolsCompress {
+        #[pymethod(magic)]
+        fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (PyIter, PyIter)) {
+            (
+                zelf.class().to_owned(),
+                (zelf.data.clone(), zelf.selectors.clone()),
+            )
+        }
+    }
 
     impl IterNextIterable for PyItertoolsCompress {}
     impl IterNext for PyItertoolsCompress {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
             loop {
-                let sel_obj = match zelf.selector.next(vm)? {
+                let sel_obj = match zelf.selectors.next(vm)? {
                     PyIterReturn::Return(obj) => obj,
                     PyIterReturn::StopIteration(v) => return Ok(PyIterReturn::StopIteration(v)),
                 };
@@ -154,17 +221,17 @@ mod decl {
     #[pyclass(name = "count")]
     #[derive(Debug, PyPayload)]
     struct PyItertoolsCount {
-        cur: PyRwLock<BigInt>,
-        step: BigInt,
+        cur: PyRwLock<PyObjectRef>,
+        step: PyObjectRef,
     }
 
     #[derive(FromArgs)]
     struct CountNewArgs {
         #[pyarg(positional, optional)]
-        start: OptionalArg<PyIntRef>,
+        start: OptionalArg<PyObjectRef>,
 
         #[pyarg(positional, optional)]
-        step: OptionalArg<PyIntRef>,
+        step: OptionalArg<PyObjectRef>,
     }
 
     impl Constructor for PyItertoolsCount {
@@ -175,14 +242,11 @@ mod decl {
             Self::Args { start, step }: Self::Args,
             vm: &VirtualMachine,
         ) -> PyResult {
-            let start = match start.into_option() {
-                Some(int) => int.as_bigint().clone(),
-                None => BigInt::zero(),
-            };
-            let step = match step.into_option() {
-                Some(int) => int.as_bigint().clone(),
-                None => BigInt::one(),
-            };
+            let start = start.into_option().unwrap_or_else(|| vm.new_pyobj(0));
+            let step = step.into_option().unwrap_or_else(|| vm.new_pyobj(1));
+            if !PyNumber::check(&start) || !PyNumber::check(&step) {
+                return Err(vm.new_type_error("a number is required".to_owned()));
+            }
 
             PyItertoolsCount {
                 cur: PyRwLock::new(start),
@@ -193,22 +257,33 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor))]
     impl PyItertoolsCount {
         // TODO: Implement this
         // if (lz->cnt == PY_SSIZE_T_MAX)
         //      return Py_BuildValue("0(00)", Py_TYPE(lz), lz->long_cnt, lz->long_step);
         #[pymethod(magic)]
-        fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (BigInt,)) {
-            (zelf.class().clone(), (zelf.cur.read().clone(),))
+        fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (PyObjectRef,)) {
+            (zelf.class().to_owned(), (zelf.cur.read().clone(),))
+        }
+
+        #[pymethod(magic)]
+        fn repr(&self, vm: &VirtualMachine) -> PyResult<String> {
+            let cur = format!("{}", self.cur.read().clone().repr(vm)?);
+            let step = &self.step;
+            if vm.bool_eq(step, vm.ctx.new_int(1).as_object())? {
+                return Ok(format!("count({})", cur));
+            }
+            Ok(format!("count({}, {})", cur, step.repr(vm)?))
         }
     }
     impl IterNextIterable for PyItertoolsCount {}
     impl IterNext for PyItertoolsCount {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
             let mut cur = zelf.cur.write();
+            let step = zelf.step.clone();
             let result = cur.clone();
-            *cur += &zelf.step;
+            *cur = vm._iadd(&cur, step.as_object())?;
             Ok(PyIterReturn::Return(result.to_pyobject(vm)))
         }
     }
@@ -236,7 +311,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor), flags(BASETYPE))]
     impl PyItertoolsCycle {}
     impl IterNextIterable for PyItertoolsCycle {}
     impl IterNext for PyItertoolsCycle {
@@ -300,7 +375,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor), flags(BASETYPE))]
+    #[pyclass(with(IterNext, Constructor), flags(BASETYPE))]
     impl PyItertoolsRepeat {
         #[pymethod(magic)]
         fn length_hint(&self, vm: &VirtualMachine) -> PyResult<usize> {
@@ -314,7 +389,7 @@ mod decl {
 
         #[pymethod(magic)]
         fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
-            let cls = zelf.class().clone();
+            let cls = zelf.class().to_owned();
             Ok(match zelf.times {
                 Some(ref times) => vm.new_tuple((cls, (zelf.object.clone(), *times.read()))),
                 None => vm.new_tuple((cls, (zelf.object.clone(),))),
@@ -376,8 +451,16 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
-    impl PyItertoolsStarmap {}
+    #[pyclass(with(IterNext, Constructor), flags(BASETYPE))]
+    impl PyItertoolsStarmap {
+        #[pymethod(magic)]
+        fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (PyObjectRef, PyIter)) {
+            (
+                zelf.class().to_owned(),
+                (zelf.function.clone(), zelf.iterable.clone()),
+            )
+        }
+    }
     impl IterNextIterable for PyItertoolsStarmap {}
     impl IterNext for PyItertoolsStarmap {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
@@ -431,8 +514,24 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
-    impl PyItertoolsTakewhile {}
+    #[pyclass(with(IterNext, Constructor), flags(BASETYPE))]
+    impl PyItertoolsTakewhile {
+        #[pymethod(magic)]
+        fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (PyObjectRef, PyIter), u32) {
+            (
+                zelf.class().to_owned(),
+                (zelf.predicate.clone(), zelf.iterable.clone()),
+                zelf.stop_flag.load() as _,
+            )
+        }
+        #[pymethod(magic)]
+        fn setstate(zelf: PyRef<Self>, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+            if let Ok(obj) = ArgIntoBool::try_from_object(vm, state) {
+                zelf.stop_flag.store(*obj);
+            }
+            Ok(())
+        }
+    }
     impl IterNextIterable for PyItertoolsTakewhile {}
     impl IterNext for PyItertoolsTakewhile {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
@@ -496,8 +595,24 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
-    impl PyItertoolsDropwhile {}
+    #[pyclass(with(IterNext, Constructor), flags(BASETYPE))]
+    impl PyItertoolsDropwhile {
+        #[pymethod(magic)]
+        fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (PyObjectRef, PyIter), u32) {
+            (
+                zelf.class().to_owned(),
+                (zelf.predicate.clone().into(), zelf.iterable.clone()),
+                (zelf.start_flag.load() as _),
+            )
+        }
+        #[pymethod(magic)]
+        fn setstate(zelf: PyRef<Self>, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+            if let Ok(obj) = ArgIntoBool::try_from_object(vm, state) {
+                zelf.start_flag.store(*obj);
+            }
+            Ok(())
+        }
+    }
     impl IterNextIterable for PyItertoolsDropwhile {}
     impl IterNext for PyItertoolsDropwhile {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
@@ -599,7 +714,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor))]
     impl PyItertoolsGroupBy {
         pub(super) fn advance(
             &self,
@@ -675,7 +790,7 @@ mod decl {
         groupby: PyRef<PyItertoolsGroupBy>,
     }
 
-    #[pyimpl(with(IterNext))]
+    #[pyclass(with(IterNext))]
     impl PyItertoolsGrouper {}
     impl IterNextIterable for PyItertoolsGrouper {}
     impl IterNext for PyItertoolsGrouper {
@@ -740,13 +855,13 @@ mod decl {
             }
         }
         // We don't have an int or value was < 0 or > sys.maxsize
-        return Err(vm.new_value_error(format!(
+        Err(vm.new_value_error(format!(
             "{} argument for islice() must be None or an integer: 0 <= x <= sys.maxsize.",
             name
-        )));
+        )))
     }
 
-    #[pyimpl(with(IterNext))]
+    #[pyclass(with(IterNext), flags(BASETYPE))]
     impl PyItertoolsIslice {
         #[pyslot]
         fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
@@ -875,12 +990,12 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor), flags(BASETYPE))]
     impl PyItertoolsFilterFalse {
         #[pymethod(magic)]
         fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (PyObjectRef, PyIter)) {
             (
-                zelf.class().clone(),
+                zelf.class().to_owned(),
                 (zelf.predicate.clone(), zelf.iterable.clone()),
             )
         }
@@ -943,7 +1058,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor))]
     impl PyItertoolsAccumulate {}
 
     impl IterNextIterable for PyItertoolsAccumulate {}
@@ -1055,7 +1170,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor))]
     impl PyItertoolsTee {
         fn from_iter(iterator: PyIter, vm: &VirtualMachine) -> PyResult {
             let class = PyItertoolsTee::class(vm);
@@ -1133,7 +1248,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor))]
     impl PyItertoolsProduct {
         fn update_idxs(&self, mut idxs: PyRwLockWriteGuard<'_, Vec<usize>>) {
             if idxs.len() == 0 {
@@ -1236,7 +1351,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor))]
     impl PyItertoolsCombinations {}
     impl IterNextIterable for PyItertoolsCombinations {}
     impl IterNext for PyItertoolsCombinations {
@@ -1327,7 +1442,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor))]
     impl PyItertoolsCombinationsWithReplacement {}
 
     impl IterNextIterable for PyItertoolsCombinationsWithReplacement {}
@@ -1368,7 +1483,7 @@ mod decl {
                 // Increment the current index which we know is not at its
                 // maximum. Then set all to the right to the same value.
                 for j in idx as usize..r {
-                    indices[j as usize] = index as usize;
+                    indices[j] = index;
                 }
             }
 
@@ -1437,7 +1552,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor))]
     impl PyItertoolsPermutations {}
     impl IterNextIterable for PyItertoolsPermutations {}
     impl IterNext for PyItertoolsPermutations {
@@ -1525,7 +1640,7 @@ mod decl {
             let iterators = iterators.into_vec();
             PyItertoolsZipLongest {
                 iterators,
-                fillvalue,
+                fillvalue: PyRwLock::new(fillvalue),
             }
             .into_ref_with_type(vm, cls)
             .map(Into::into)
@@ -1537,11 +1652,31 @@ mod decl {
     #[derive(Debug, PyPayload)]
     struct PyItertoolsZipLongest {
         iterators: Vec<PyIter>,
-        fillvalue: PyObjectRef,
+        fillvalue: PyRwLock<PyObjectRef>,
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
-    impl PyItertoolsZipLongest {}
+    #[pyclass(with(IterNext, Constructor))]
+    impl PyItertoolsZipLongest {
+        #[pymethod(magic)]
+        fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            let args: Vec<PyObjectRef> = zelf
+                .iterators
+                .iter()
+                .map(|i| i.clone().to_pyobject(vm))
+                .collect();
+            Ok(vm.new_tuple((
+                zelf.class().to_owned(),
+                vm.new_tuple(args),
+                zelf.fillvalue.read().to_owned(),
+            )))
+        }
+
+        #[pymethod(magic)]
+        fn setstate(zelf: PyRef<Self>, state: PyObjectRef, _vm: &VirtualMachine) -> PyResult<()> {
+            *zelf.fillvalue.write() = state;
+            Ok(())
+        }
+    }
     impl IterNextIterable for PyItertoolsZipLongest {}
     impl IterNext for PyItertoolsZipLongest {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
@@ -1559,7 +1694,7 @@ mod decl {
                         if numactive == 0 {
                             return Ok(PyIterReturn::StopIteration(v));
                         }
-                        zelf.fillvalue.clone()
+                        zelf.fillvalue.read().clone()
                     }
                 };
                 result.push(next_obj);
@@ -1589,7 +1724,7 @@ mod decl {
         }
     }
 
-    #[pyimpl(with(IterNext, Constructor))]
+    #[pyclass(with(IterNext, Constructor))]
     impl PyItertoolsPairwise {}
     impl IterNextIterable for PyItertoolsPairwise {}
     impl IterNext for PyItertoolsPairwise {

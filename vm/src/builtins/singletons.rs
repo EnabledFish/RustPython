@@ -1,7 +1,11 @@
 use super::{PyType, PyTypeRef};
 use crate::{
-    class::PyClassImpl, convert::ToPyObject, types::Constructor, Context, Py, PyObjectRef,
-    PyPayload, PyResult, VirtualMachine,
+    atomic_func,
+    class::PyClassImpl,
+    convert::ToPyObject,
+    protocol::PyNumberMethods,
+    types::{AsNumber, Constructor},
+    Context, Py, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
 
 #[pyclass(module = false, name = "NoneType")]
@@ -39,7 +43,7 @@ impl Constructor for PyNone {
     }
 }
 
-#[pyimpl(with(Constructor))]
+#[pyclass(with(Constructor, AsNumber))]
 impl PyNone {
     #[pymethod(magic)]
     fn repr(&self) -> String {
@@ -49,6 +53,16 @@ impl PyNone {
     #[pymethod(magic)]
     fn bool(&self) -> bool {
         false
+    }
+}
+
+impl AsNumber for PyNone {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            boolean: atomic_func!(|_number, _vm| Ok(false)),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
     }
 }
 
@@ -70,7 +84,7 @@ impl Constructor for PyNotImplemented {
     }
 }
 
-#[pyimpl(with(Constructor))]
+#[pyclass(with(Constructor))]
 impl PyNotImplemented {
     // TODO: As per https://bugs.python.org/issue35712, using NotImplemented
     // in boolean contexts will need to raise a DeprecationWarning in 3.9

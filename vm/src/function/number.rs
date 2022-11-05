@@ -1,4 +1,4 @@
-use crate::{protocol::PyNumber, AsObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine};
+use crate::{AsObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine};
 use num_complex::Complex64;
 use std::ops::Deref;
 
@@ -82,7 +82,7 @@ impl Deref for ArgIntoFloat {
 impl TryFromObject for ArgIntoFloat {
     // Equivalent to PyFloat_AsDouble.
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
-        let value = PyNumber::new(obj.as_ref(), vm).float(vm)?.to_f64();
+        let value = obj.try_float(vm)?.to_f64();
         Ok(ArgIntoFloat { value })
     }
 }
@@ -95,7 +95,7 @@ impl TryFromObject for ArgIntoFloat {
 /// By default an object is considered true unless its class defines either a
 /// `__bool__()` method that returns False or a `__len__()` method that returns
 /// zero, when called with the object.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct ArgIntoBool {
     value: bool,
 }

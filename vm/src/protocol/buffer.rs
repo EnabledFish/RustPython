@@ -7,10 +7,9 @@ use crate::{
         lock::{MapImmutable, PyMutex, PyMutexGuard},
     },
     object::PyObjectPayload,
-    sliceable::wrap_index,
+    sliceable::SequenceIndexOp,
     types::{Constructor, Unconstructible},
-    AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromBorrowedObject,
-    VirtualMachine,
+    Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromBorrowedObject, VirtualMachine,
 };
 use itertools::Itertools;
 use std::{borrow::Cow, fmt::Debug, ops::Range};
@@ -140,7 +139,8 @@ impl PyBuffer {
 impl TryFromBorrowedObject for PyBuffer {
     fn try_from_borrowed_object(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Self> {
         let cls = obj.class();
-        if let Some(f) = cls.mro_find_map(|cls| cls.slots.as_buffer) {
+        let as_buffer = cls.mro_find_map(|cls| cls.slots.as_buffer);
+        if let Some(f) = as_buffer {
             return f(obj, vm);
         }
         Err(vm.new_type_error(format!(
@@ -254,7 +254,7 @@ impl BufferDescriptor {
             .cloned()
             .zip_eq(self.dim_desc.iter().cloned())
         {
-            let i = wrap_index(i, shape).ok_or_else(|| {
+            let i = i.wrapped_at(shape).ok_or_else(|| {
                 vm.new_index_error(format!("index out of bounds on dimension {}", i))
             })?;
             pos += i as isize * stride + suboffset;
@@ -400,7 +400,7 @@ pub struct VecBuffer {
     data: PyMutex<Vec<u8>>,
 }
 
-#[pyimpl(flags(BASETYPE), with(Constructor))]
+#[pyclass(flags(BASETYPE), with(Constructor))]
 impl VecBuffer {
     pub fn take(&self) -> Vec<u8> {
         std::mem::take(&mut self.data.lock())

@@ -5,13 +5,14 @@ use super::{
 };
 use crate::{
     anystr::{self, adjust_indices, AnyStr, AnyStrContainer, AnyStrWrapper},
+    atomic_func,
     class::PyClassImpl,
     convert::{ToPyException, ToPyObject},
     format::{FormatSpec, FormatString, FromTemplate},
     function::{ArgIterable, FuncArgs, OptionalArg, OptionalOption, PyComparisonValue},
     intern::PyInterned,
     protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
-    sequence::SequenceOp,
+    sequence::SequenceExt,
     sliceable::{SequenceIndex, SliceableSequenceOp},
     types::{
         AsMapping, AsSequence, Comparable, Constructor, Hashable, IterNext, IterNextIterable,
@@ -84,16 +85,6 @@ impl TryFromBorrowedObject for String {
     }
 }
 
-/// str(object='') -> str
-/// str(bytes_or_buffer[, encoding[, errors]]) -> str
-///
-/// Create a new string object from the given object. If encoding or
-/// errors is specified, then the object must expose a data buffer
-/// that will be decoded using the given encoding and error handler.
-/// Otherwise, returns the result of object.__str__() (if defined)
-/// or repr(object).
-/// encoding defaults to sys.getdefaultencoding().
-/// errors defaults to 'strict'."
 #[pyclass(module = false, name = "str")]
 pub struct PyStr {
     bytes: Box<[u8]>,
@@ -247,7 +238,7 @@ impl PyPayload for PyStrIterator {
     }
 }
 
-#[pyimpl(with(Constructor, IterNext))]
+#[pyclass(with(Constructor, IterNext))]
 impl PyStrIterator {
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {
@@ -394,7 +385,7 @@ impl PyStr {
     }
 }
 
-#[pyimpl(
+#[pyclass(
     flags(BASETYPE),
     with(AsMapping, AsSequence, Hashable, Comparable, Iterable, Constructor)
 )]
@@ -442,9 +433,9 @@ impl PyStr {
     }
 
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult {
-        match SequenceIndex::try_from_borrowed_object(vm, needle)? {
-            SequenceIndex::Int(i) => self.get_item_by_index(vm, i).map(|x| x.to_string()),
-            SequenceIndex::Slice(slice) => self.get_item_by_slice(vm, slice),
+        match SequenceIndex::try_from_borrowed_object(vm, needle, "str")? {
+            SequenceIndex::Int(i) => self.getitem_by_index(vm, i).map(|x| x.to_string()),
+            SequenceIndex::Slice(slice) => self.getitem_by_slice(vm, slice),
         }
         .map(|x| self.new_substr(x).into_ref(vm).into())
     }
@@ -928,9 +919,13 @@ impl PyStr {
     }
 
     #[pymethod]
-    fn join(&self, iterable: ArgIterable<PyStrRef>, vm: &VirtualMachine) -> PyResult<String> {
+    fn join(&self, iterable: ArgIterable<PyStrRef>, vm: &VirtualMachine) -> PyResult<PyStrRef> {
         let iter = iterable.iter(vm)?;
-        self.as_str().py_join(iter)
+
+        match iter.exactly_one() {
+            Ok(first) => first,
+            Err(iter) => Ok(vm.ctx.new_str(self.as_str().py_join(iter)?)),
+        }
     }
 
     // FIXME: two traversals of str is expensive
@@ -1169,7 +1164,7 @@ impl PyStr {
                                     "character mapping must be in range(0x110000)".to_owned(),
                                 )
                             })?;
-                        translated.push(ch as char);
+                        translated.push(ch);
                     } else if !vm.is_none(&value) {
                         return Err(vm.new_type_error(
                             "character mapping must return integer, None or str".to_owned(),
@@ -1254,6 +1249,11 @@ impl PyStr {
     fn encode(zelf: PyRef<Self>, args: EncodeArgs, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
         encode_string(zelf, args.encoding, args.errors, vm)
     }
+
+    #[pymethod(magic)]
+    fn getnewargs(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyObjectRef {
+        (zelf.as_str(),).to_pyobject(vm)
+    }
 }
 
 impl PyStrRef {
@@ -1301,32 +1301,42 @@ impl Iterable for PyStr {
 }
 
 impl AsMapping for PyStr {
-    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-        length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
-        subscript: Some(|mapping, needle, vm| Self::mapping_downcast(mapping)._getitem(needle, vm)),
-        ass_subscript: None,
-    };
+    fn as_mapping() -> &'static PyMappingMethods {
+        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+            length: atomic_func!(|mapping, _vm| Ok(PyStr::mapping_downcast(mapping).len())),
+            subscript: atomic_func!(
+                |mapping, needle, vm| PyStr::mapping_downcast(mapping)._getitem(needle, vm)
+            ),
+            ..PyMappingMethods::NOT_IMPLEMENTED
+        };
+        &AS_MAPPING
+    }
 }
 
 impl AsSequence for PyStr {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
-        concat: Some(|seq, other, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            Self::add(zelf.to_owned(), other.to_owned(), vm)
-        }),
-        repeat: Some(|seq, n, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            Self::mul(zelf.to_owned(), n as isize, vm).map(|x| x.into())
-        }),
-        item: Some(|seq, i, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            zelf.get_item_by_index(vm, i)
-                .map(|x| zelf.new_substr(x.to_string()).into_ref(vm).into())
-        }),
-        contains: Some(|seq, needle, vm| Self::sequence_downcast(seq)._contains(needle, vm)),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+            length: atomic_func!(|seq, _vm| Ok(PyStr::sequence_downcast(seq).len())),
+            concat: atomic_func!(|seq, other, vm| {
+                let zelf = PyStr::sequence_downcast(seq);
+                PyStr::add(zelf.to_owned(), other.to_owned(), vm)
+            }),
+            repeat: atomic_func!(|seq, n, vm| {
+                let zelf = PyStr::sequence_downcast(seq);
+                PyStr::mul(zelf.to_owned(), n as isize, vm).map(|x| x.into())
+            }),
+            item: atomic_func!(|seq, i, vm| {
+                let zelf = PyStr::sequence_downcast(seq);
+                zelf.getitem_by_index(vm, i)
+                    .map(|x| zelf.new_substr(x.to_string()).into_ref(vm).into())
+            }),
+            contains: atomic_func!(
+                |seq, needle, vm| PyStr::sequence_downcast(seq)._contains(needle, vm)
+            ),
+            ..PySequenceMethods::NOT_IMPLEMENTED
+        };
+        &AS_SEQUENCE
+    }
 }
 
 #[derive(FromArgs)]
@@ -1583,23 +1593,19 @@ mod tests {
         Interpreter::without_stdlib(Default::default()).enter(|vm| {
             let table = vm.ctx.new_dict();
             table
-                .set_item("a", vm.ctx.new_str("🎅").into(), &vm)
+                .set_item("a", vm.ctx.new_str("🎅").into(), vm)
                 .unwrap();
-            table.set_item("b", vm.ctx.none(), &vm).unwrap();
+            table.set_item("b", vm.ctx.none(), vm).unwrap();
             table
-                .set_item("c", vm.ctx.new_str(ascii!("xda")).into(), &vm)
+                .set_item("c", vm.ctx.new_str(ascii!("xda")).into(), vm)
                 .unwrap();
-            let translated = PyStr::maketrans(
-                table.into(),
-                OptionalArg::Missing,
-                OptionalArg::Missing,
-                &vm,
-            )
-            .unwrap();
+            let translated =
+                PyStr::maketrans(table.into(), OptionalArg::Missing, OptionalArg::Missing, vm)
+                    .unwrap();
             let text = PyStr::from("abc");
-            let translated = text.translate(translated, &vm).unwrap();
+            let translated = text.translate(translated, vm).unwrap();
             assert_eq!(translated, "🎅xda".to_owned());
-            let translated = text.translate(vm.ctx.new_int(3).into(), &vm);
+            let translated = text.translate(vm.ctx.new_int(3).into(), vm);
             assert_eq!(
                 translated.unwrap_err().class().name().deref(),
                 "TypeError".to_owned()
@@ -1611,7 +1617,7 @@ mod tests {
 impl<'s> AnyStrWrapper<'s> for PyStrRef {
     type Str = str;
     fn as_ref(&self) -> &str {
-        &*self.as_str()
+        self.as_str()
     }
 }
 

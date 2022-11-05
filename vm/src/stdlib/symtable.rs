@@ -3,14 +3,11 @@ pub(crate) use symtable::make_module;
 #[pymodule]
 mod symtable {
     use crate::{
-        builtins::PyStrRef,
-        compile::{self, Symbol, SymbolScope, SymbolTable, SymbolTableType},
-        PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+        builtins::PyStrRef, compiler, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     };
+    use rustpython_codegen::symboltable::{Symbol, SymbolScope, SymbolTable, SymbolTableType};
     use std::fmt;
 
-    /// symtable. Return top level SymbolTable.
-    /// See docs: https://docs.python.org/3/library/symtable.html?highlight=symtable#symtable.symtable
     #[pyfunction]
     fn symtable(
         source: PyStrRef,
@@ -20,10 +17,10 @@ mod symtable {
     ) -> PyResult<PySymbolTableRef> {
         let mode = mode
             .as_str()
-            .parse::<compile::Mode>()
+            .parse::<compiler::Mode>()
             .map_err(|err| vm.new_value_error(err.to_string()))?;
 
-        let symtable = compile::compile_symtable(source.as_str(), mode, filename.as_str())
+        let symtable = compiler::compile_symtable(source.as_str(), mode, filename.as_str())
             .map_err(|err| vm.new_syntax_error(&err))?;
 
         let py_symbol_table = to_py_symbol_table(symtable);
@@ -50,7 +47,7 @@ mod symtable {
         }
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl PySymbolTable {
         #[pymethod]
         fn get_name(&self) -> String {
@@ -163,7 +160,7 @@ mod symtable {
         }
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl PySymbol {
         #[pymethod]
         fn get_name(&self) -> String {

@@ -1,5 +1,3 @@
-#[cfg(feature = "rustpython-compiler")]
-use crate::compile::{CompileError, CompileErrorType};
 use crate::{
     builtins::{
         pystr::IntoPyStrRef,
@@ -151,6 +149,11 @@ impl VirtualMachine {
         self.new_exception_msg(os_error, msg)
     }
 
+    pub fn new_system_error(&self, msg: String) -> PyBaseExceptionRef {
+        let sys_error = self.ctx.exceptions.system_error.to_owned();
+        self.new_exception_msg(sys_error, msg)
+    }
+
     pub fn new_unicode_decode_error(&self, msg: String) -> PyBaseExceptionRef {
         let unicode_decode_error = self.ctx.exceptions.unicode_decode_error.to_owned();
         self.new_exception_msg(unicode_decode_error, msg)
@@ -204,13 +207,17 @@ impl VirtualMachine {
         self.new_exception_msg(overflow_error, msg)
     }
 
-    #[cfg(feature = "rustpython-compiler")]
-    pub fn new_syntax_error(&self, error: &CompileError) -> PyBaseExceptionRef {
+    #[cfg(any(feature = "rustpython-parser", feature = "rustpython-codegen"))]
+    pub fn new_syntax_error(&self, error: &crate::compiler::CompileError) -> PyBaseExceptionRef {
         let syntax_error_type = match &error.error {
-            CompileErrorType::Parse(p) if p.is_indentation_error() => {
+            #[cfg(feature = "rustpython-parser")]
+            crate::compiler::CompileErrorType::Parse(p) if p.is_indentation_error() => {
                 self.ctx.exceptions.indentation_error
             }
-            CompileErrorType::Parse(p) if p.is_tab_error() => self.ctx.exceptions.tab_error,
+            #[cfg(feature = "rustpython-parser")]
+            crate::compiler::CompileErrorType::Parse(p) if p.is_tab_error() => {
+                self.ctx.exceptions.tab_error
+            }
             _ => self.ctx.exceptions.syntax_error,
         }
         .to_owned();
@@ -260,12 +267,21 @@ impl VirtualMachine {
     }
 
     pub fn new_stop_iteration(&self, value: Option<PyObjectRef>) -> PyBaseExceptionRef {
+        let dict = self.ctx.new_dict();
         let args = if let Some(value) = value {
+            // manually set `value` attribute like StopIteration.__init__
+            dict.set_item("value", value.clone(), self)
+                .expect("dict.__setitem__ never fails");
             vec![value]
         } else {
             Vec::new()
         };
-        self.new_exception(self.ctx.exceptions.stop_iteration.to_owned(), args)
+
+        PyRef::new_ref(
+            PyBaseException::new(args, self),
+            self.ctx.exceptions.stop_iteration.to_owned(),
+            Some(dict),
+        )
     }
 
     fn new_downcast_error(

@@ -9,7 +9,8 @@ import io
 import unittest
 from unittest.mock import patch
 from test import support
-from test.support import os_helper, warnings_helper
+from test.support import os_helper
+from test.support import warnings_helper
 import os
 try:
     import ssl
@@ -202,7 +203,6 @@ class urlopen_FileTests(unittest.TestCase):
     def test_url(self):
         self.assertEqual(self.returned_obj.url, self.quoted_pathname)
 
-    @unittest.skip("TODO: RUSTPYTHON (AttributeError: 'BufferedReader' object has no attribute 'status')")
     def test_status(self):
         self.assertIsNone(self.returned_obj.status)
 
@@ -372,8 +372,6 @@ class urlopen_HttpTests(unittest.TestCase, FakeHTTPMixin, FakeFTPMixin):
         finally:
             self.unfakehttp()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     @unittest.skipUnless(ssl, "ssl module required")
     def test_url_path_with_control_char_rejected(self):
         for char_no in list(range(0, 0x21)) + [0x7f]:
@@ -401,8 +399,6 @@ class urlopen_HttpTests(unittest.TestCase, FakeHTTPMixin, FakeFTPMixin):
             finally:
                 self.unfakehttp()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     @unittest.skipUnless(ssl, "ssl module required")
     def test_url_path_with_newline_header_injection_rejected(self):
         self.fakehttp(b"HTTP/1.1 200 OK\r\n\r\nHello.")
@@ -429,8 +425,6 @@ class urlopen_HttpTests(unittest.TestCase, FakeHTTPMixin, FakeFTPMixin):
         finally:
             self.unfakehttp()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     @unittest.skipUnless(ssl, "ssl module required")
     def test_url_host_with_control_char_rejected(self):
         for char_no in list(range(0, 0x21)) + [0x7f]:
@@ -448,8 +442,6 @@ class urlopen_HttpTests(unittest.TestCase, FakeHTTPMixin, FakeFTPMixin):
             finally:
                 self.unfakehttp()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     @unittest.skipUnless(ssl, "ssl module required")
     def test_url_host_with_newline_header_injection_rejected(self):
         self.fakehttp(b"HTTP/1.1 200 OK\r\n\r\nHello.")
@@ -615,7 +607,6 @@ Connection: close
                 )
 
 
-@unittest.skip("TODO: RUSTPYTHON, error in setUp(); ValueError: error decoding base64: Invalid byte 32, offset 95.")
 class urlopen_DataTests(unittest.TestCase):
     """Test urlopen() opening a data URL."""
 
@@ -1274,7 +1265,6 @@ class UnquotingTests(unittest.TestCase):
         self.assertEqual(expect, result,
                          "using unquote(): %r != %r" % (expect, result))
 
-    @unittest.skip("TODO: RUSTPYTHON (TypeError: Expected str, got bytes)")
     def test_unquoting_with_bytes_input(self):
         # ASCII characters decoded to a string
         given = b'blueberryjam'
@@ -1536,9 +1526,10 @@ class Pathname_Tests(unittest.TestCase):
                          "url2pathname() failed; %s != %s" %
                          (expect, result))
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     @unittest.skipUnless(sys.platform == 'win32',
                          'test specific to the nturl2path functions.')
-    @unittest.expectedFailure
     def test_prefixes(self):
         # Test special prefixes are correctly handled in pathname2url()
         given = '\\\\?\\C:\\dir'

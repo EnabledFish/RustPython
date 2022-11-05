@@ -3,22 +3,12 @@ use crate::{
     builtins::{PyInt, PyIntRef, PyStrInterned},
     function::PyArithmeticValue,
     object::{AsObject, PyObject, PyObjectRef, PyResult},
-    protocol::{PyIterReturn, PyNumber},
+    protocol::PyIterReturn,
     types::PyComparisonOp,
 };
 
 /// Collection of operators
 impl VirtualMachine {
-    pub fn to_index_opt(&self, obj: PyObjectRef) -> Option<PyResult<PyIntRef>> {
-        PyNumber::new(obj.as_ref(), self)
-            .index_opt(self)
-            .transpose()
-    }
-
-    pub fn to_index(&self, obj: &PyObject) -> PyResult<PyIntRef> {
-        PyNumber::new(obj, self).index(self)
-    }
-
     #[inline]
     pub fn bool_eq(&self, a: &PyObject, b: &PyObject) -> PyResult<bool> {
         a.rich_compare_bool(b, PyComparisonOp::Eq, self)
@@ -156,7 +146,7 @@ impl VirtualMachine {
         reflection: &'static PyStrInterned,
         unsupported: fn(&VirtualMachine, &PyObject, &PyObject) -> PyResult,
     ) -> PyResult {
-        if rhs.fast_isinstance(&lhs.class()) {
+        if rhs.fast_isinstance(lhs.class()) {
             let lop = lhs.get_class_attr(reflection);
             let rop = rhs.get_class_attr(reflection);
             if let Some((lop, rop)) = lop.zip(rop) {
@@ -173,7 +163,7 @@ impl VirtualMachine {
         self.call_or_unsupported(lhs, rhs, default, move |vm, lhs, rhs| {
             // Try to call the reflection method
             // don't call reflection method if operands are of the same type
-            if !lhs.class().is(&rhs.class()) {
+            if !lhs.class().is(rhs.class()) {
                 vm.call_or_unsupported(rhs, lhs, reflection, |_, rhs, lhs| {
                     // switch them around again
                     unsupported(vm, lhs, rhs)
@@ -513,7 +503,7 @@ impl VirtualMachine {
         let iter = haystack.get_iter(self)?;
         loop {
             if let PyIterReturn::Return(element) = iter.next(self)? {
-                if self.bool_eq(&needle, &element)? {
+                if self.bool_eq(&element, &needle)? {
                     return Ok(self.ctx.new_bool(true));
                 } else {
                     continue;

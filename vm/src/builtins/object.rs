@@ -2,8 +2,7 @@ use super::{PyDict, PyDictRef, PyList, PyStr, PyStrRef, PyType, PyTypeRef};
 use crate::common::hash::PyHash;
 use crate::{
     class::PyClassImpl,
-    function::Either,
-    function::{FuncArgs, PyArithmeticValue, PyComparisonValue},
+    function::{Either, FuncArgs, PyArithmeticValue, PyComparisonValue, PySetterValue},
     types::PyComparisonOp,
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
@@ -25,7 +24,7 @@ impl PyPayload for PyBaseObject {
     }
 }
 
-#[pyimpl(flags(BASETYPE))]
+#[pyclass(flags(BASETYPE))]
 impl PyBaseObject {
     /// Create and return a new object.  See help(type) for accurate signature.
     #[pyslot]
@@ -162,20 +161,20 @@ impl PyBaseObject {
         value: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        obj.generic_setattr(name, Some(value), vm)
+        obj.generic_setattr(name, PySetterValue::Assign(value), vm)
     }
 
     /// Implement delattr(self, name).
     #[pymethod]
     fn __delattr__(obj: PyObjectRef, name: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
-        obj.generic_setattr(name, None, vm)
+        obj.generic_setattr(name, PySetterValue::Delete, vm)
     }
 
     #[pyslot]
     fn slot_setattro(
         obj: &PyObject,
         attr_name: PyStrRef,
-        value: Option<PyObjectRef>,
+        value: PySetterValue,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         obj.generic_setattr(attr_name, value, vm)
@@ -260,18 +259,18 @@ impl PyBaseObject {
         Ok(())
     }
 
-    #[pyproperty(name = "__class__")]
+    #[pygetset(name = "__class__")]
     fn get_class(obj: PyObjectRef) -> PyTypeRef {
-        obj.class().clone()
+        obj.class().to_owned()
     }
 
-    #[pyproperty(name = "__class__", setter)]
+    #[pygetset(name = "__class__", setter)]
     fn set_class(instance: PyObjectRef, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         if instance.payload_is::<PyBaseObject>() {
             match value.downcast::<PyType>() {
                 Ok(cls) => {
                     // FIXME(#1979) cls instances might have a payload
-                    *instance.class_lock().write() = cls;
+                    instance.set_class(cls, vm);
                     Ok(())
                 }
                 Err(value) => {
@@ -312,7 +311,7 @@ impl PyBaseObject {
         let __reduce__ = identifier!(vm, __reduce__);
         if let Some(reduce) = vm.get_attribute_opt(obj.clone(), __reduce__)? {
             let object_reduce = vm.ctx.types.object_type.get_attr(__reduce__).unwrap();
-            let typ_obj: PyObjectRef = obj.class().clone().into();
+            let typ_obj: PyObjectRef = obj.class().to_owned().into();
             let class_reduce = typ_obj.get_attr(__reduce__, vm)?;
             if !class_reduce.is(&object_reduce) {
                 return vm.invoke(&reduce, ());

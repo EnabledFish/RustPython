@@ -691,8 +691,6 @@ class GlobalsTest(unittest.TestCase):
                             'missing name "%s" in __all__' % name)
 
 
-# TODO: RUSTPYTHON
-@unittest.expectedFailure
 class DocTests(unittest.TestCase):
     @unittest.skipIf(sys.flags.optimize >= 2,
                      "Docstrings are omitted with -OO and above")
@@ -1474,8 +1472,6 @@ class TestMean(NumericTestCase, AverageMixin, UnivariateTypeMixin):
         d = Decimal('1e4')
         self.assertEqual(statistics.mean([d]), d)
 
-    # TODO: RUSTPYTHON division converts ints to floats before dividing, not after
-    @unittest.expectedFailure
     def test_regression_25177(self):
         # Regression test for issue 25177.
         # Ensure very big and very small floats don't overflow.

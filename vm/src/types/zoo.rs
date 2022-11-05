@@ -1,9 +1,10 @@
 use crate::{
     builtins::{
         asyncgenerator, bool_, builtinfunc, bytearray, bytes, classmethod, code, complex,
-        coroutine, dict, enumerate, filter, float, frame, function, generator, genericalias,
-        getset, int, iter, list, map, mappingproxy, memory, module, namespace, object, property,
-        pystr, range, set, singletons, slice, staticmethod, super_, traceback, tuple,
+        coroutine, descriptor, dict, enumerate, filter, float, frame, function, generator,
+        genericalias, getset, int, iter, list, map, mappingproxy, memory, module, namespace,
+        object, property, pystr, range, set, singletons, slice, staticmethod, super_, traceback,
+        tuple,
         type_::{self, PyType},
         union_, weakproxy, weakref, zip,
     },
@@ -57,6 +58,7 @@ pub struct TypeZoo {
     pub dict_items_type: &'static Py<PyType>,
     pub map_type: &'static Py<PyType>,
     pub memoryview_type: &'static Py<PyType>,
+    pub memoryviewiterator_type: &'static Py<PyType>,
     pub tuple_type: &'static Py<PyType>,
     pub tuple_iterator_type: &'static Py<PyType>,
     pub set_type: &'static Py<PyType>,
@@ -88,6 +90,7 @@ pub struct TypeZoo {
     pub not_implemented_type: &'static Py<PyType>,
     pub generic_alias_type: &'static Py<PyType>,
     pub union_type: &'static Py<PyType>,
+    pub member_descriptor_type: &'static Py<PyType>,
 }
 
 impl TypeZoo {
@@ -158,6 +161,7 @@ impl TypeZoo {
             list_iterator_type: list::PyListIterator::init_bare_type(),
             list_reverseiterator_type: list::PyListReverseIterator::init_bare_type(),
             mappingproxy_type: mappingproxy::PyMappingProxy::init_bare_type(),
+            memoryviewiterator_type: memory::PyMemoryViewIterator::init_bare_type(),
             module_type: module::PyModule::init_bare_type(),
             namespace_type: namespace::PyNamespace::init_bare_type(),
             range_iterator_type: range::PyRangeIterator::init_bare_type(),
@@ -172,6 +176,7 @@ impl TypeZoo {
             not_implemented_type: singletons::PyNotImplemented::init_bare_type(),
             generic_alias_type: genericalias::PyGenericAlias::init_bare_type(),
             union_type: union_::PyUnion::init_bare_type(),
+            member_descriptor_type: descriptor::MemberDescrObject::init_bare_type(),
         }
     }
 
@@ -220,5 +225,6 @@ impl TypeZoo {
         traceback::init(context);
         genericalias::init(context);
         union_::init(context);
+        descriptor::init(context);
     }
 }

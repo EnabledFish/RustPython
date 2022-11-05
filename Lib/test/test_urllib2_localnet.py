@@ -8,7 +8,6 @@ import threading
 import unittest
 import hashlib
 
-from test import support
 from test.support import hashlib_helper
 from test.support import threading_helper
 from test.support import warnings_helper
@@ -357,6 +356,7 @@ class ProxyAuthTests(unittest.TestCase):
         self.server.stop()
         self.server = None
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_proxy_with_bad_password_raises_httperror(self):
         self.proxy_digest_handler.add_password(self.REALM, self.URL,
                                                self.USER, self.PASSWD+"bad")
@@ -365,12 +365,14 @@ class ProxyAuthTests(unittest.TestCase):
                           self.opener.open,
                           self.URL)
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_proxy_with_no_password_raises_httperror(self):
         self.digest_auth_handler.set_qop("auth")
         self.assertRaises(urllib.error.HTTPError,
                           self.opener.open,
                           self.URL)
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_proxy_qop_auth_works(self):
         self.proxy_digest_handler.add_password(self.REALM, self.URL,
                                                self.USER, self.PASSWD)
@@ -379,6 +381,7 @@ class ProxyAuthTests(unittest.TestCase):
             while result.read():
                 pass
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_proxy_qop_auth_int_works_or_throws_urlerror(self):
         self.proxy_digest_handler.add_password(self.REALM, self.URL,
                                                self.USER, self.PASSWD)
@@ -451,6 +454,9 @@ class TestUrlopen(unittest.TestCase):
     def setUp(self):
         super(TestUrlopen, self).setUp()
 
+        # clear _opener global variable
+        self.addCleanup(urllib.request.urlcleanup)
+
         # Ignore proxies for localhost tests.
         def restore_environ(old_environ):
             os.environ.clear()
@@ -500,6 +506,7 @@ class TestUrlopen(unittest.TestCase):
         handler.port = server.port
         return handler
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_redirection(self):
         expected_response = b"We got here..."
         responses = [
@@ -513,6 +520,7 @@ class TestUrlopen(unittest.TestCase):
         self.assertEqual(data, expected_response)
         self.assertEqual(handler.requests, ["/", "/somewhere_else"])
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_chunked(self):
         expected_response = b"hello world"
         chunked_start = (
@@ -527,6 +535,7 @@ class TestUrlopen(unittest.TestCase):
         data = self.urlopen("http://localhost:%s/" % handler.port)
         self.assertEqual(data, expected_response)
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_404(self):
         expected_response = b"Bad bad bad..."
         handler = self.start_server([(404, [], expected_response)])
@@ -542,6 +551,7 @@ class TestUrlopen(unittest.TestCase):
         self.assertEqual(data, expected_response)
         self.assertEqual(handler.requests, ["/weeble"])
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_200(self):
         expected_response = b"pycon 2008..."
         handler = self.start_server([(200, [], expected_response)])
@@ -549,6 +559,7 @@ class TestUrlopen(unittest.TestCase):
         self.assertEqual(data, expected_response)
         self.assertEqual(handler.requests, ["/bizarre"])
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_200_with_parameters(self):
         expected_response = b"pycon 2008..."
         handler = self.start_server([(200, [], expected_response)])
@@ -559,6 +570,7 @@ class TestUrlopen(unittest.TestCase):
 
     # TODO: RUSTPYTHON
     @unittest.expectedFailure
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_https(self):
         handler = self.start_https_server()
         context = ssl.create_default_context(cafile=CERT_localhost)
@@ -567,6 +579,7 @@ class TestUrlopen(unittest.TestCase):
 
     # TODO: RUSTPYTHON
     @unittest.expectedFailure
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_https_with_cafile(self):
         handler = self.start_https_server(certfile=CERT_localhost)
         with warnings_helper.check_warnings(('', DeprecationWarning)):
@@ -584,6 +597,7 @@ class TestUrlopen(unittest.TestCase):
                 self.urlopen("https://localhost:%s/bizarre" % handler.port,
                              cafile=CERT_fakehostname)
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_https_with_cadefault(self):
         handler = self.start_https_server(certfile=CERT_localhost)
         # Self-signed cert should fail verification with system certificate store
@@ -594,6 +608,7 @@ class TestUrlopen(unittest.TestCase):
 
     # TODO: RUSTPYTHON
     @unittest.expectedFailure
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_https_sni(self):
         if ssl is None:
             self.skipTest("ssl module required")
@@ -610,6 +625,7 @@ class TestUrlopen(unittest.TestCase):
         self.urlopen("https://localhost:%s" % handler.port, context=context)
         self.assertEqual(sni_name, "localhost")
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_sending_headers(self):
         handler = self.start_server()
         req = urllib.request.Request("http://localhost:%s/" % handler.port,
@@ -618,6 +634,17 @@ class TestUrlopen(unittest.TestCase):
             pass
         self.assertEqual(handler.headers_received["Range"], "bytes=20-39")
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
+    def test_sending_headers_camel(self):
+        handler = self.start_server()
+        req = urllib.request.Request("http://localhost:%s/" % handler.port,
+                                     headers={"X-SoMe-hEader": "foobar"})
+        with urllib.request.urlopen(req):
+            pass
+        self.assertIn("X-Some-Header", handler.headers_received.keys())
+        self.assertNotIn("X-SoMe-hEader", handler.headers_received.keys())
+
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_basic(self):
         handler = self.start_server()
         with urllib.request.urlopen("http://localhost:%s" % handler.port) as open_url:
@@ -626,6 +653,7 @@ class TestUrlopen(unittest.TestCase):
                              "urlopen lacks the %s attribute" % attr)
             self.assertTrue(open_url.read(), "calling 'read' failed")
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_info(self):
         handler = self.start_server()
         open_url = urllib.request.urlopen(
@@ -637,6 +665,7 @@ class TestUrlopen(unittest.TestCase):
                               "instance of email.message.Message")
         self.assertEqual(info_obj.get_content_subtype(), "plain")
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_geturl(self):
         # Make sure same URL as opened is returned by geturl.
         handler = self.start_server()
@@ -645,6 +674,7 @@ class TestUrlopen(unittest.TestCase):
             url = open_url.geturl()
         self.assertEqual(url, "http://localhost:%s" % handler.port)
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_iteration(self):
         expected_response = b"pycon 2008..."
         handler = self.start_server([(200, [], expected_response)])
@@ -652,6 +682,7 @@ class TestUrlopen(unittest.TestCase):
         for line in data:
             self.assertEqual(line, expected_response)
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
     def test_line_iteration(self):
         lines = [b"We\n", b"got\n", b"here\n", b"verylong " * 8192 + b"\n"]
         expected_response = b"".join(lines)
@@ -664,18 +695,30 @@ class TestUrlopen(unittest.TestCase):
                              (index, len(lines[index]), len(line)))
         self.assertEqual(index + 1, len(lines))
 
+    @unittest.skipIf(os.name == "nt", "TODO: RUSTPYTHON, ValueError: illegal environment variable name")
+    def test_issue16464(self):
+        # See https://bugs.python.org/issue16464
+        # and https://bugs.python.org/issue46648
+        handler = self.start_server([
+            (200, [], b'any'),
+            (200, [], b'any'),
+        ])
+        opener = urllib.request.build_opener()
+        request = urllib.request.Request("http://localhost:%s" % handler.port)
+        self.assertEqual(None, request.data)
 
-threads_key = None
+        opener.open(request, "1".encode("us-ascii"))
+        self.assertEqual(b"1", request.data)
+        self.assertEqual("1", request.get_header("Content-length"))
+
+        opener.open(request, "1234567890".encode("us-ascii"))
+        self.assertEqual(b"1234567890", request.data)
+        self.assertEqual("10", request.get_header("Content-length"))
 
 def setUpModule():
-    # Store the threading_setup in a key and ensure that it is cleaned up
-    # in the tearDown
-    global threads_key
-    threads_key = threading_helper.threading_setup()
+    thread_info = threading_helper.threading_setup()
+    unittest.addModuleCleanup(threading_helper.threading_cleanup, *thread_info)
 
-def tearDownModule():
-    if threads_key:
-        threading_helper.threading_cleanup(*threads_key)
 
 if __name__ == "__main__":
     unittest.main()

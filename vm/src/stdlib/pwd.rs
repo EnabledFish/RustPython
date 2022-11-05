@@ -5,8 +5,9 @@ mod pwd {
     use crate::{
         builtins::{PyIntRef, PyStrRef},
         convert::{IntoPyException, ToPyObject},
+        exceptions,
         types::PyStructSequence,
-        AsObject, PyObjectRef, PyResult, VirtualMachine,
+        PyObjectRef, PyResult, VirtualMachine,
     };
     use nix::unistd::{self, User};
     use std::ptr::NonNull;
@@ -23,7 +24,7 @@ mod pwd {
         pw_dir: String,
         pw_shell: String,
     }
-    #[pyimpl(with(PyStructSequence))]
+    #[pyclass(with(PyStructSequence))]
     impl Passwd {}
 
     impl From<User> for Passwd {
@@ -52,36 +53,39 @@ mod pwd {
 
     #[pyfunction]
     fn getpwnam(name: PyStrRef, vm: &VirtualMachine) -> PyResult<Passwd> {
-        match User::from_name(name.as_str()).map_err(|err| err.into_pyexception(vm))? {
-            Some(user) => Ok(Passwd::from(user)),
-            None => {
-                let name_repr = name.as_object().repr(vm)?;
-                let message = vm
-                    .ctx
-                    .new_str(format!("getpwnam(): name not found: {}", name_repr))
-                    .into();
-                Err(vm.new_key_error(message))
-            }
+        let pw_name = name.as_str();
+        if pw_name.contains('\0') {
+            return Err(exceptions::cstring_error(vm));
         }
+        let user = User::from_name(name.as_str()).map_err(|err| err.into_pyexception(vm))?;
+        let user = user.ok_or_else(|| {
+            vm.new_key_error(
+                vm.ctx
+                    .new_str(format!("getpwnam(): name not found: {}", pw_name))
+                    .into(),
+            )
+        })?;
+        Ok(Passwd::from(user))
     }
 
     #[pyfunction]
     fn getpwuid(uid: PyIntRef, vm: &VirtualMachine) -> PyResult<Passwd> {
-        let uid_t = libc::uid_t::try_from(uid.as_bigint()).map(unistd::Uid::from_raw);
-        let user = match uid_t {
-            Ok(uid) => User::from_uid(uid).map_err(|err| err.into_pyexception(vm))?,
-            Err(_) => None,
-        };
-        match user {
-            Some(user) => Ok(Passwd::from(user)),
-            None => {
-                let message = vm
-                    .ctx
+        let uid_t = libc::uid_t::try_from(uid.as_bigint())
+            .map(unistd::Uid::from_raw)
+            .ok();
+        let user = uid_t
+            .map(User::from_uid)
+            .transpose()
+            .map_err(|err| err.into_pyexception(vm))?
+            .flatten();
+        let user = user.ok_or_else(|| {
+            vm.new_key_error(
+                vm.ctx
                     .new_str(format!("getpwuid(): uid not found: {}", uid.as_bigint()))
-                    .into();
-                Err(vm.new_key_error(message))
-            }
-        }
+                    .into(),
+            )
+        })?;
+        Ok(Passwd::from(user))
     }
 
     // TODO: maybe merge this functionality into nix?

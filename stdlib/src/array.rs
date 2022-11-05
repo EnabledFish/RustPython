@@ -6,26 +6,28 @@ mod array {
         common::{
             atomic::{self, AtomicUsize},
             lock::{
-                PyMappedRwLockReadGuard, PyMappedRwLockWriteGuard, PyRwLock, PyRwLockReadGuard,
-                PyRwLockWriteGuard,
+                PyMappedRwLockReadGuard, PyMappedRwLockWriteGuard, PyMutex, PyRwLock,
+                PyRwLockReadGuard, PyRwLockWriteGuard,
             },
             str::wchar_t,
         },
         vm::{
+            atomic_func,
             builtins::{
-                PyByteArray, PyBytes, PyBytesRef, PyDictRef, PyFloat, PyInt, PyIntRef, PyList,
-                PyListRef, PyStr, PyStrRef, PyTupleRef, PyTypeRef,
+                PositionIterInternal, PyByteArray, PyBytes, PyBytesRef, PyDictRef, PyFloat, PyInt,
+                PyIntRef, PyList, PyListRef, PyStr, PyStrRef, PyTupleRef, PyTypeRef,
             },
             class_or_notimplemented,
-            convert::{ToPyObject, ToPyResult, TryFromBorrowedObject, TryFromObject},
+            convert::{ToPyObject, ToPyResult, TryFromObject},
             function::{ArgBytesLike, ArgIntoFloat, ArgIterable, OptionalArg, PyComparisonValue},
             protocol::{
                 BufferDescriptor, BufferMethods, BufferResizeGuard, PyBuffer, PyIterReturn,
                 PyMappingMethods,
             },
-            sequence::{SequenceMutOp, SequenceOp},
+            sequence::{OptionalRangeArgs, SequenceExt, SequenceMutExt},
             sliceable::{
-                SaturatedSlice, SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp,
+                SaturatedSlice, SequenceIndex, SequenceIndexOp, SliceableSequenceMutOp,
+                SliceableSequenceOp,
             },
             types::{
                 AsBuffer, AsMapping, Comparable, Constructor, IterNext, IterNextIterable, Iterable,
@@ -128,7 +130,7 @@ mod array {
                     match self {
                         $(ArrayContentType::$n(v) => {
                             let val = <$t>::try_into_from_object(vm, obj)?;
-                            v.insert(v.saturate_index(i), val);
+                            v.insert(i.saturated_at(v.len()), val);
                         })*
                     }
                     Ok(())
@@ -229,12 +231,18 @@ mod array {
                     }
                 }
 
-                fn index(&self, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
+                fn index(
+                    &self,
+                    obj: PyObjectRef,
+                    start: usize,
+                    stop: usize,
+                    vm: &VirtualMachine
+                ) -> PyResult<usize> {
                     match self {
                         $(ArrayContentType::$n(v) => {
                             if let Ok(val) = <$t>::try_into_from_object(vm, obj) {
-                                if let Some(pos) = v.iter().position(|&a| a == val) {
-                                    return Ok(pos);
+                                if let Some(pos) = v.iter().take(stop as _).skip(start as _).position(|&elem| elem == val) {
+                                    return Ok(pos + start);
                                 }
                             }
                             Err(vm.new_value_error("array.index(x): x not in array".to_owned()))
@@ -263,7 +271,7 @@ mod array {
                 fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult {
                     match self {
                         $(ArrayContentType::$n(v) => {
-                            v.get_item_by_index(vm, i).map(|x| x.to_pyresult(vm))?
+                            v.getitem_by_index(vm, i).map(|x| x.to_pyresult(vm))?
                         })*
                     }
                 }
@@ -271,7 +279,7 @@ mod array {
                 fn getitem_by_slice(&self, slice: SaturatedSlice, vm: &VirtualMachine) -> PyResult {
                     match self {
                         $(ArrayContentType::$n(v) => {
-                            let r = v.get_item_by_slice(vm, slice)?;
+                            let r = v.getitem_by_slice(vm, slice)?;
                             let array = PyArray::from(ArrayContentType::$n(r));
                             array.to_pyresult(vm)
                         })*
@@ -287,7 +295,7 @@ mod array {
                     match self {
                         $(ArrayContentType::$n(v) => {
                             let value = <$t>::try_into_from_object(vm, value)?;
-                            v.set_item_by_index(vm, i, value)
+                            v.setitem_by_index(vm, i, value)
                         })*
                     }
                 }
@@ -300,7 +308,7 @@ mod array {
                 ) -> PyResult<()> {
                     match self {
                         $(Self::$n(elements) => if let ArrayContentType::$n(items) = items {
-                            elements.set_item_by_slice(vm, slice, items)
+                            elements.setitem_by_slice(vm, slice, items)
                         } else {
                             Err(vm.new_type_error(
                                 "bad argument type for built-in operation".to_owned()
@@ -317,7 +325,7 @@ mod array {
                 ) -> PyResult<()> {
                     match self {
                         $(Self::$n(elements) => if let ArrayContentType::$n(items) = items {
-                            elements.set_item_by_slice_no_resize(vm, slice, items)
+                            elements.setitem_by_slice_no_resize(vm, slice, items)
                         } else {
                             Err(vm.new_type_error(
                                 "bad argument type for built-in operation".to_owned()
@@ -666,7 +674,7 @@ mod array {
         }
     }
 
-    #[pyimpl(
+    #[pyclass(
         flags(BASETYPE),
         with(Comparable, AsBuffer, AsMapping, Iterable, Constructor)
     )]
@@ -679,14 +687,14 @@ mod array {
             self.array.write()
         }
 
-        #[pyproperty]
+        #[pygetset]
         fn typecode(&self, vm: &VirtualMachine) -> PyStrRef {
             vm.ctx
                 .intern_str(self.read().typecode().to_string())
                 .to_owned()
         }
 
-        #[pyproperty]
+        #[pygetset]
         fn itemsize(&self) -> usize {
             self.read().itemsize()
         }
@@ -718,7 +726,7 @@ mod array {
             if zelf.is(&obj) {
                 w.imul(2, vm)
             } else if let Some(array) = obj.payload::<PyArray>() {
-                w.iadd(&*array.read(), vm)
+                w.iadd(&array.read(), vm)
             } else {
                 let iter = ArgIterable::try_from_object(vm, obj)?;
                 // zelf.extend_from_iterable(iter, vm)
@@ -857,8 +865,14 @@ mod array {
         }
 
         #[pymethod]
-        fn index(&self, x: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
-            self.read().index(x, vm)
+        fn index(
+            &self,
+            x: PyObjectRef,
+            range: OptionalRangeArgs,
+            vm: &VirtualMachine,
+        ) -> PyResult<usize> {
+            let (start, stop) = range.saturate(self.len(), vm)?;
+            self.read().index(x, start, stop, vm)
         }
 
         #[pymethod]
@@ -942,7 +956,7 @@ mod array {
         }
 
         fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult {
-            match SequenceIndex::try_from_borrowed_object(vm, needle)? {
+            match SequenceIndex::try_from_borrowed_object(vm, needle, "array")? {
                 SequenceIndex::Int(i) => self.read().getitem_by_index(i, vm),
                 SequenceIndex::Slice(slice) => self.read().getitem_by_slice(slice, vm),
             }
@@ -959,7 +973,7 @@ mod array {
             value: PyObjectRef,
             vm: &VirtualMachine,
         ) -> PyResult<()> {
-            match SequenceIndex::try_from_borrowed_object(vm, needle)? {
+            match SequenceIndex::try_from_borrowed_object(vm, needle, "array")? {
                 SequenceIndex::Int(i) => zelf.write().setitem_by_index(i, value, vm),
                 SequenceIndex::Slice(slice) => {
                     let cloned;
@@ -1001,7 +1015,7 @@ mod array {
         }
 
         fn _delitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
-            match SequenceIndex::try_from_borrowed_object(vm, needle)? {
+            match SequenceIndex::try_from_borrowed_object(vm, needle, "array")? {
                 SequenceIndex::Int(i) => self.try_resizable(vm)?.delitem_by_index(i, vm),
                 SequenceIndex::Slice(slice) => self.try_resizable(vm)?.delitem_by_slice(slice, vm),
             }
@@ -1016,7 +1030,7 @@ mod array {
         fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
             if let Some(other) = other.payload::<PyArray>() {
                 self.read()
-                    .add(&*other.read(), vm)
+                    .add(&other.read(), vm)
                     .map(|array| PyArray::from(array).into_ref(vm))
             } else {
                 Err(vm.new_type_error(format!(
@@ -1035,7 +1049,7 @@ mod array {
             if zelf.is(&other) {
                 zelf.try_resizable(vm)?.imul(2, vm)?;
             } else if let Some(other) = other.payload::<PyArray>() {
-                zelf.try_resizable(vm)?.iadd(&*other.read(), vm)?;
+                zelf.try_resizable(vm)?.iadd(&other.read(), vm)?;
             } else {
                 return Err(vm.new_type_error(format!(
                     "can only extend array with array (not \"{}\")",
@@ -1091,7 +1105,7 @@ mod array {
             let array_b = other.read();
 
             // fast path for same ArrayContentType type
-            if let Ok(ord) = array_a.cmp(&*array_b) {
+            if let Ok(ord) = array_a.cmp(&array_b) {
                 return Ok(ord == Some(Ordering::Equal));
             }
 
@@ -1115,7 +1129,7 @@ mod array {
                 return Self::reduce(zelf, vm);
             }
             let array = zelf.read();
-            let cls = zelf.class().clone();
+            let cls = zelf.class().to_owned();
             let typecode = vm.ctx.new_str(array.typecode_str());
             let bytes = vm.ctx.new_bytes(array.get_bytes().to_vec());
             let code = MachineFormatCode::from_typecode(array.typecode()).unwrap();
@@ -1135,7 +1149,7 @@ mod array {
             vm: &VirtualMachine,
         ) -> PyResult<(PyObjectRef, PyTupleRef, Option<PyDictRef>)> {
             let array = zelf.read();
-            let cls = zelf.class().clone();
+            let cls = zelf.class().to_owned();
             let typecode = vm.ctx.new_str(array.typecode_str());
             let values = if array.typecode() == 'u' {
                 let s = Self::_wchar_bytes_to_string(array.get_bytes(), array.itemsize(), vm)?;
@@ -1174,7 +1188,7 @@ mod array {
             let array_a = zelf.read();
             let array_b = other.read();
 
-            let res = match array_a.cmp(&*array_b) {
+            let res = match array_a.cmp(&array_b) {
                 // fast path for same ArrayContentType type
                 Ok(partial_ord) => partial_ord.map_or(false, |ord| op.eval_ord(ord)),
                 Err(()) => {
@@ -1239,27 +1253,29 @@ mod array {
     };
 
     impl AsMapping for PyArray {
-        const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-            length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
-            subscript: Some(|mapping, needle, vm| {
-                Self::mapping_downcast(mapping)._getitem(needle, vm)
-            }),
-            ass_subscript: Some(|mapping, needle, value, vm| {
-                let zelf = Self::mapping_downcast(mapping);
-                if let Some(value) = value {
-                    Self::_setitem(zelf.to_owned(), needle, value, vm)
-                } else {
-                    zelf._delitem(needle, vm)
-                }
-            }),
-        };
+        fn as_mapping() -> &'static PyMappingMethods {
+            static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+                length: atomic_func!(|mapping, _vm| Ok(PyArray::mapping_downcast(mapping).len())),
+                subscript: atomic_func!(|mapping, needle, vm| {
+                    PyArray::mapping_downcast(mapping)._getitem(needle, vm)
+                }),
+                ass_subscript: atomic_func!(|mapping, needle, value, vm| {
+                    let zelf = PyArray::mapping_downcast(mapping);
+                    if let Some(value) = value {
+                        PyArray::_setitem(zelf.to_owned(), needle, value, vm)
+                    } else {
+                        zelf._delitem(needle, vm)
+                    }
+                }),
+            };
+            &AS_MAPPING
+        }
     }
 
     impl Iterable for PyArray {
         fn iter(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
             Ok(PyArrayIter {
-                position: AtomicUsize::new(0),
-                array: zelf,
+                internal: PyMutex::new(PositionIterInternal::new(zelf, 0)),
             }
             .into_pyobject(vm))
         }
@@ -1270,7 +1286,7 @@ mod array {
 
         fn try_resizable_opt(&'a self) -> Option<Self::Resizable> {
             let w = self.write();
-            (self.exports.load(atomic::Ordering::SeqCst) == 0).then(|| w)
+            (self.exports.load(atomic::Ordering::SeqCst) == 0).then_some(w)
         }
     }
 
@@ -1278,23 +1294,35 @@ mod array {
     #[pyclass(name = "arrayiterator")]
     #[derive(Debug, PyPayload)]
     pub struct PyArrayIter {
-        position: AtomicUsize,
-        array: PyArrayRef,
+        internal: PyMutex<PositionIterInternal<PyArrayRef>>,
     }
 
-    #[pyimpl(with(IterNext))]
-    impl PyArrayIter {}
+    #[pyclass(with(IterNext), flags(HAS_DICT))]
+    impl PyArrayIter {
+        #[pymethod(magic)]
+        fn setstate(&self, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+            self.internal
+                .lock()
+                .set_state(state, |obj, pos| pos.min(obj.len()), vm)
+        }
+
+        #[pymethod(magic)]
+        fn reduce(&self, vm: &VirtualMachine) -> PyTupleRef {
+            self.internal
+                .lock()
+                .builtins_iter_reduce(|x| x.clone().into(), vm)
+        }
+    }
 
     impl IterNextIterable for PyArrayIter {}
     impl IterNext for PyArrayIter {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-            let pos = zelf.position.fetch_add(1, atomic::Ordering::SeqCst);
-            let r = if let Some(item) = zelf.array.read().get(pos, vm) {
-                PyIterReturn::Return(item?)
-            } else {
-                PyIterReturn::StopIteration(None)
-            };
-            Ok(r)
+            zelf.internal.lock().next(|array, pos| {
+                Ok(match array.read().get(pos, vm) {
+                    Some(item) => PyIterReturn::Return(item?),
+                    None => PyIterReturn::StopIteration(None),
+                })
+            })
         }
     }
 

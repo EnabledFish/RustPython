@@ -5,43 +5,11 @@ use super::{PyType, PyTypeRef};
 use crate::common::lock::PyRwLock;
 use crate::{
     class::PyClassImpl,
-    function::FuncArgs,
+    function::{FuncArgs, PySetterValue},
     types::{Constructor, GetDescriptor, Initializer},
     AsObject, Context, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
 };
 
-/// Property attribute.
-///
-///   fget
-///     function to be used for getting an attribute value
-///   fset
-///     function to be used for setting an attribute value
-///   fdel
-///     function to be used for del'ing an attribute
-///   doc
-///     docstring
-///
-/// Typical use is to define a managed attribute x:
-///
-/// class C(object):
-///     def getx(self): return self._x
-///     def setx(self, value): self._x = value
-///     def delx(self): del self._x
-///     x = property(getx, setx, delx, "I'm the 'x' property.")
-///
-/// Decorators make defining new properties or modifying existing ones easy:
-///
-/// class C(object):
-///     @property
-///     def x(self):
-///         "I am the 'x' property."
-///         return self._x
-///     @x.setter
-///     def x(self, value):
-///         self._x = value
-///     @x.deleter
-///     def x(self):
-///         del self._x
 #[pyclass(module = false, name = "property")]
 #[derive(Debug)]
 pub struct PyProperty {
@@ -87,7 +55,7 @@ impl GetDescriptor for PyProperty {
     }
 }
 
-#[pyimpl(with(Constructor, Initializer, GetDescriptor), flags(BASETYPE))]
+#[pyclass(with(Constructor, Initializer, GetDescriptor), flags(BASETYPE))]
 impl PyProperty {
     // Descriptor methods
 
@@ -95,19 +63,19 @@ impl PyProperty {
     fn descr_set(
         zelf: PyObjectRef,
         obj: PyObjectRef,
-        value: Option<PyObjectRef>,
+        value: PySetterValue,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         let zelf = PyRef::<Self>::try_from_object(vm, zelf)?;
         match value {
-            Some(value) => {
+            PySetterValue::Assign(value) => {
                 if let Some(setter) = zelf.setter.read().as_ref() {
                     vm.invoke(setter, (obj, value)).map(drop)
                 } else {
                     Err(vm.new_attribute_error("can't set attribute".to_owned()))
                 }
             }
-            None => {
+            PySetterValue::Delete => {
                 if let Some(deleter) = zelf.deleter.read().as_ref() {
                     vm.invoke(deleter, (obj,)).map(drop)
                 } else {
@@ -123,26 +91,26 @@ impl PyProperty {
         value: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        Self::descr_set(zelf, obj, Some(value), vm)
+        Self::descr_set(zelf, obj, PySetterValue::Assign(value), vm)
     }
     #[pymethod]
     fn __delete__(zelf: PyObjectRef, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
-        Self::descr_set(zelf, obj, None, vm)
+        Self::descr_set(zelf, obj, PySetterValue::Delete, vm)
     }
 
     // Access functions
 
-    #[pyproperty]
+    #[pygetset]
     fn fget(&self) -> Option<PyObjectRef> {
         self.getter.read().clone()
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn fset(&self) -> Option<PyObjectRef> {
         self.setter.read().clone()
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn fdel(&self) -> Option<PyObjectRef> {
         self.deleter.read().clone()
     }
@@ -168,7 +136,7 @@ impl PyProperty {
             deleter: PyRwLock::new(zelf.fdel()),
             doc: PyRwLock::new(None),
         }
-        .into_ref_with_type(vm, zelf.class().clone())
+        .into_ref_with_type(vm, zelf.class().to_owned())
     }
 
     #[pymethod]
@@ -183,7 +151,7 @@ impl PyProperty {
             deleter: PyRwLock::new(zelf.fdel()),
             doc: PyRwLock::new(None),
         }
-        .into_ref_with_type(vm, zelf.class().clone())
+        .into_ref_with_type(vm, zelf.class().to_owned())
     }
 
     #[pymethod]
@@ -198,10 +166,10 @@ impl PyProperty {
             deleter: PyRwLock::new(deleter.or_else(|| zelf.fdel())),
             doc: PyRwLock::new(None),
         }
-        .into_ref_with_type(vm, zelf.class().clone())
+        .into_ref_with_type(vm, zelf.class().to_owned())
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn isabstractmethod(&self, vm: &VirtualMachine) -> PyObjectRef {
         let getter_abstract = match self.getter.read().to_owned() {
             Some(getter) => getter
@@ -219,7 +187,7 @@ impl PyProperty {
             .unwrap_or_else(|_| vm.ctx.new_bool(false).into())
     }
 
-    #[pyproperty(magic, setter)]
+    #[pygetset(magic, setter)]
     fn set_isabstractmethod(&self, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         if let Some(getter) = self.getter.read().to_owned() {
             getter.set_attr("__isabstractmethod__", value, vm)?;

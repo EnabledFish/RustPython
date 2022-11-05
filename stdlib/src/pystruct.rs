@@ -84,7 +84,7 @@ pub(crate) mod _struct {
                     bytes at offset {offset} (actual buffer size is {buffer_len})",
                     op = op,
                     op_action = op_action,
-                    required = needed + offset as usize,
+                    required = needed + offset,
                     needed = needed,
                     offset = offset,
                     buffer_len = buffer_len
@@ -197,7 +197,7 @@ pub(crate) mod _struct {
         }
     }
 
-    #[pyimpl(with(IterNext))]
+    #[pyclass(with(IterNext))]
     impl UnpackIterator {
         #[pymethod(magic)]
         fn length_hint(&self) -> usize {
@@ -256,14 +256,14 @@ pub(crate) mod _struct {
         }
     }
 
-    #[pyimpl(with(Constructor))]
+    #[pyclass(with(Constructor))]
     impl PyStruct {
-        #[pyproperty]
+        #[pygetset]
         fn format(&self) -> PyStrRef {
             self.format.clone()
         }
 
-        #[pyproperty]
+        #[pygetset]
         #[inline]
         fn size(&self) -> usize {
             self.spec.size

@@ -205,11 +205,11 @@ mod decl {
             return Ok((empty.clone(), empty.clone(), empty));
         }
 
-        let nfds = [&mut r, &mut w, &mut x]
+        let nfds: i32 = [&mut r, &mut w, &mut x]
             .iter_mut()
             .filter_map(|set| set.highest())
             .max()
-            .map_or(0, |n| n + 1) as i32;
+            .map_or(0, |n| n + 1) as _;
 
         loop {
             let mut tv = timeout.map(sec_to_timeval);
@@ -308,7 +308,7 @@ mod decl {
 
         const DEFAULT_EVENTS: i16 = libc::POLLIN | libc::POLLPRI | libc::POLLOUT;
 
-        #[pyimpl]
+        #[pyclass]
         impl PyPoll {
             #[pymethod]
             fn register(&self, Fildes(fd): Fildes, eventmask: OptionalArg<u16>) {
@@ -347,7 +347,7 @@ mod decl {
                     Some(ms) => {
                         let ms = if let Some(float) = ms.payload::<PyFloat>() {
                             float.to_f64().to_i32()
-                        } else if let Some(int) = vm.to_index_opt(ms.clone()) {
+                        } else if let Some(int) = ms.try_index_opt(vm) {
                             int?.as_bigint().to_i32()
                         } else {
                             return Err(vm.new_type_error(format!(

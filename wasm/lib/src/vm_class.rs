@@ -5,10 +5,8 @@ use crate::{
 };
 use js_sys::{Object, TypeError};
 use rustpython_vm::{
-    builtins::PyWeak,
-    compile::{self, Mode},
-    scope::Scope,
-    Interpreter, PyObjectRef, PyPayload, PyRef, PyResult, Settings, VirtualMachine,
+    builtins::PyWeak, compiler::Mode, scope::Scope, Interpreter, PyObjectRef, PyPayload, PyRef,
+    PyResult, Settings, VirtualMachine,
 };
 use std::{
     cell::RefCell,
@@ -44,6 +42,12 @@ impl StoredVirtualMachine {
         let mut settings = Settings::default();
         settings.allow_external_library = false;
         let interp = Interpreter::with_init(settings, |vm| {
+            #[cfg(feature = "stdlib")]
+            vm.add_native_modules(rustpython_stdlib::get_module_inits());
+
+            #[cfg(feature = "freeze-stdlib")]
+            vm.add_frozen(rustpython_pylib::frozen_stdlib());
+
             vm.wasm_id = Some(id);
 
             js_module::setup_js_module(vm);
@@ -324,7 +328,7 @@ impl WASMVirtualMachine {
     pub(crate) fn run(
         &self,
         source: &str,
-        mode: compile::Mode,
+        mode: Mode,
         source_path: Option<String>,
     ) -> Result<JsValue, JsValue> {
         self.with_vm(|vm, StoredVirtualMachine { ref scope, .. }| {
@@ -337,11 +341,11 @@ impl WASMVirtualMachine {
     }
 
     pub fn exec(&self, source: &str, source_path: Option<String>) -> Result<JsValue, JsValue> {
-        self.run(source, compile::Mode::Exec, source_path)
+        self.run(source, Mode::Exec, source_path)
     }
 
     pub fn eval(&self, source: &str, source_path: Option<String>) -> Result<JsValue, JsValue> {
-        self.run(source, compile::Mode::Eval, source_path)
+        self.run(source, Mode::Eval, source_path)
     }
 
     #[wasm_bindgen(js_name = execSingle)]
@@ -350,6 +354,6 @@ impl WASMVirtualMachine {
         source: &str,
         source_path: Option<String>,
     ) -> Result<JsValue, JsValue> {
-        self.run(source, compile::Mode::Single, source_path)
+        self.run(source, Mode::Single, source_path)
     }
 }

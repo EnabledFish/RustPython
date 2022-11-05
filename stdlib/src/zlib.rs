@@ -62,7 +62,6 @@ mod zlib {
         )
     }
 
-    /// Compute an Adler-32 checksum of data.
     #[pyfunction]
     fn adler32(data: ArgBytesLike, begin_state: OptionalArg<PyIntRef>) -> u32 {
         data.with_ref(|data| {
@@ -74,7 +73,6 @@ mod zlib {
         })
     }
 
-    /// Compute a CRC-32 checksum of data.
     #[pyfunction]
     fn crc32(data: ArgBytesLike, begin_state: OptionalArg<PyIntRef>) -> u32 {
         crate::binascii::crc32(data, begin_state)
@@ -288,17 +286,17 @@ mod zlib {
         unused_data: PyMutex<PyBytesRef>,
         unconsumed_tail: PyMutex<PyBytesRef>,
     }
-    #[pyimpl]
+    #[pyclass]
     impl PyDecompress {
-        #[pyproperty]
+        #[pygetset]
         fn eof(&self) -> bool {
             self.eof.load()
         }
-        #[pyproperty]
+        #[pygetset]
         fn unused_data(&self) -> PyBytesRef {
             self.unused_data.lock().clone()
         }
-        #[pyproperty]
+        #[pygetset]
         fn unconsumed_tail(&self) -> PyBytesRef {
             self.unconsumed_tail.lock().clone()
         }
@@ -447,7 +445,7 @@ mod zlib {
         inner: PyMutex<CompressInner>,
     }
 
-    #[pyimpl]
+    #[pyclass]
     impl PyCompress {
         #[pymethod]
         fn compress(&self, data: ArgBytesLike, vm: &VirtualMachine) -> PyResult<Vec<u8>> {

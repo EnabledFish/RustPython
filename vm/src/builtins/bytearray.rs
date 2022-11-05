@@ -5,10 +5,11 @@ use super::{
 };
 use crate::{
     anystr::{self, AnyStr},
+    atomic_func,
+    byte::{bytes_from_object, value_from_object},
     bytesinner::{
-        bytes_decode, bytes_from_object, value_from_object, ByteInnerFindOptions,
-        ByteInnerNewOptions, ByteInnerPaddingOptions, ByteInnerSplitOptions,
-        ByteInnerTranslateOptions, DecodeArgs, PyBytesInner,
+        bytes_decode, ByteInnerFindOptions, ByteInnerNewOptions, ByteInnerPaddingOptions,
+        ByteInnerSplitOptions, ByteInnerTranslateOptions, DecodeArgs, PyBytesInner,
     },
     class::PyClassImpl,
     common::{
@@ -32,8 +33,8 @@ use crate::{
         AsBuffer, AsMapping, AsSequence, Callable, Comparable, Constructor, Hashable, Initializer,
         IterNext, IterNextIterable, Iterable, PyComparisonOp, Unconstructible, Unhashable,
     },
-    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
-    TryFromBorrowedObject, TryFromObject, VirtualMachine,
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
+    VirtualMachine,
 };
 use bstr::ByteSlice;
 use std::mem::size_of;
@@ -92,7 +93,7 @@ pub(crate) fn init(context: &Context) {
     PyByteArrayIterator::extend_class(context, context.types.bytearray_iterator_type);
 }
 
-#[pyimpl(
+#[pyclass(
     flags(BASETYPE),
     with(
         Constructor,
@@ -107,7 +108,7 @@ pub(crate) fn init(context: &Context) {
 )]
 impl PyByteArray {
     #[cfg(debug_assertions)]
-    #[pyproperty]
+    #[pygetset]
     fn exports(&self) -> usize {
         self.exports.load(Ordering::Relaxed)
     }
@@ -146,7 +147,7 @@ impl PyByteArray {
 
     #[pymethod(magic)]
     fn add(&self, other: ArgBytesLike) -> Self {
-        self.inner().add(&*other.borrow_buf()).into()
+        self.inner().add(&other.borrow_buf()).into()
     }
 
     #[pymethod(magic)]
@@ -160,7 +161,7 @@ impl PyByteArray {
 
     fn _setitem_by_index(&self, i: isize, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         let value = value_from_object(vm, &value)?;
-        self.borrow_buf_mut().set_item_by_index(vm, i, value)
+        self.borrow_buf_mut().setitem_by_index(vm, i, value)
     }
 
     fn _setitem(
@@ -169,7 +170,7 @@ impl PyByteArray {
         value: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        match SequenceIndex::try_from_borrowed_object(vm, needle)? {
+        match SequenceIndex::try_from_borrowed_object(vm, needle, "bytearray")? {
             SequenceIndex::Int(i) => zelf._setitem_by_index(i, value, vm),
             SequenceIndex::Slice(slice) => {
                 let items = if zelf.is(&value) {
@@ -178,10 +179,10 @@ impl PyByteArray {
                     bytes_from_object(vm, &value)?
                 };
                 if let Some(mut w) = zelf.try_resizable_opt() {
-                    w.elements.set_item_by_slice(vm, slice, &items)
+                    w.elements.setitem_by_slice(vm, slice, &items)
                 } else {
                     zelf.borrow_buf_mut()
-                        .set_item_by_slice_no_resize(vm, slice, &items)
+                        .setitem_by_slice_no_resize(vm, slice, &items)
                 }
             }
         }
@@ -206,14 +207,14 @@ impl PyByteArray {
     }
 
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult {
-        match SequenceIndex::try_from_borrowed_object(vm, needle)? {
+        match SequenceIndex::try_from_borrowed_object(vm, needle, "bytearray")? {
             SequenceIndex::Int(i) => self
                 .borrow_buf()
-                .get_item_by_index(vm, i)
+                .getitem_by_index(vm, i)
                 .map(|x| vm.ctx.new_int(x).into()),
             SequenceIndex::Slice(slice) => self
                 .borrow_buf()
-                .get_item_by_slice(vm, slice)
+                .getitem_by_slice(vm, slice)
                 .map(|x| Self::new_ref(x, &vm.ctx).into()),
         }
     }
@@ -224,7 +225,7 @@ impl PyByteArray {
     }
 
     pub fn _delitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
-        match SequenceIndex::try_from_borrowed_object(vm, needle)? {
+        match SequenceIndex::try_from_borrowed_object(vm, needle, "bytearray")? {
             SequenceIndex::Int(i) => self.try_resizable(vm)?.elements.del_item_by_index(vm, i),
             SequenceIndex::Slice(slice) => {
                 // TODO: delete 0 elements don't need resizable
@@ -683,7 +684,7 @@ impl PyByteArray {
     ) -> (PyTypeRef, PyTupleRef, Option<PyDictRef>) {
         let bytes = PyBytes::from(zelf.borrow_buf().to_vec()).to_pyobject(vm);
         (
-            zelf.class().clone(),
+            zelf.class().to_owned(),
             PyTuple::new_ref(vec![bytes], &vm.ctx),
             zelf.as_object().dict(),
         )
@@ -762,69 +763,76 @@ impl<'a> BufferResizeGuard<'a> for PyByteArray {
 
     fn try_resizable_opt(&'a self) -> Option<Self::Resizable> {
         let w = self.inner.write();
-        (self.exports.load(Ordering::SeqCst) == 0).then(|| w)
+        (self.exports.load(Ordering::SeqCst) == 0).then_some(w)
     }
 }
 
 impl AsMapping for PyByteArray {
-    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-        length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
-        subscript: Some(|mapping, needle, vm| {
-            Self::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
-        }),
-        ass_subscript: Some(|mapping, needle, value, vm| {
-            let zelf = Self::mapping_downcast(mapping);
-            if let Some(value) = value {
-                Self::setitem(zelf.to_owned(), needle.to_owned(), value, vm)
-            } else {
-                zelf.delitem(needle.to_owned(), vm)
-            }
-        }),
-    };
+    fn as_mapping() -> &'static PyMappingMethods {
+        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+            length: atomic_func!(|mapping, _vm| Ok(PyByteArray::mapping_downcast(mapping).len())),
+            subscript: atomic_func!(|mapping, needle, vm| {
+                PyByteArray::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
+            }),
+            ass_subscript: atomic_func!(|mapping, needle, value, vm| {
+                let zelf = PyByteArray::mapping_downcast(mapping);
+                if let Some(value) = value {
+                    PyByteArray::setitem(zelf.to_owned(), needle.to_owned(), value, vm)
+                } else {
+                    zelf.delitem(needle.to_owned(), vm)
+                }
+            }),
+        };
+        &AS_MAPPING
+    }
 }
 
 impl AsSequence for PyByteArray {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
-        concat: Some(|seq, other, vm| {
-            Self::sequence_downcast(seq)
-                .inner()
-                .concat(other, vm)
-                .map(|x| PyByteArray::from(x).into_pyobject(vm))
-        }),
-        repeat: Some(|seq, n, vm| {
-            Self::sequence_downcast(seq)
-                .mul(n as isize, vm)
-                .map(|x| x.into_pyobject(vm))
-        }),
-        item: Some(|seq, i, vm| {
-            Self::sequence_downcast(seq)
-                .borrow_buf()
-                .get_item_by_index(vm, i)
-                .map(|x| vm.ctx.new_bytes(vec![x]).into())
-        }),
-        ass_item: Some(|seq, i, value, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            if let Some(value) = value {
-                zelf._setitem_by_index(i, value, vm)
-            } else {
-                zelf.borrow_buf_mut().del_item_by_index(vm, i)
-            }
-        }),
-        contains: Some(|seq, other, vm| {
-            let other = <Either<PyBytesInner, PyIntRef>>::try_from_object(vm, other.to_owned())?;
-            Self::sequence_downcast(seq).contains(other, vm)
-        }),
-        inplace_concat: Some(|seq, other, vm| {
-            let other = ArgBytesLike::try_from_object(vm, other.to_owned())?;
-            let zelf = Self::sequence_downcast(seq).to_owned();
-            Self::iadd(zelf, other, vm).map(|x| x.into())
-        }),
-        inplace_repeat: Some(|seq, n, vm| {
-            let zelf = Self::sequence_downcast(seq).to_owned();
-            Self::imul(zelf, n as isize, vm).map(|x| x.into())
-        }),
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+            length: atomic_func!(|seq, _vm| Ok(PyByteArray::sequence_downcast(seq).len())),
+            concat: atomic_func!(|seq, other, vm| {
+                PyByteArray::sequence_downcast(seq)
+                    .inner()
+                    .concat(other, vm)
+                    .map(|x| PyByteArray::from(x).into_pyobject(vm))
+            }),
+            repeat: atomic_func!(|seq, n, vm| {
+                PyByteArray::sequence_downcast(seq)
+                    .mul(n as isize, vm)
+                    .map(|x| x.into_pyobject(vm))
+            }),
+            item: atomic_func!(|seq, i, vm| {
+                PyByteArray::sequence_downcast(seq)
+                    .borrow_buf()
+                    .getitem_by_index(vm, i)
+                    .map(|x| vm.ctx.new_bytes(vec![x]).into())
+            }),
+            ass_item: atomic_func!(|seq, i, value, vm| {
+                let zelf = PyByteArray::sequence_downcast(seq);
+                if let Some(value) = value {
+                    zelf._setitem_by_index(i, value, vm)
+                } else {
+                    zelf.borrow_buf_mut().del_item_by_index(vm, i)
+                }
+            }),
+            contains: atomic_func!(|seq, other, vm| {
+                let other =
+                    <Either<PyBytesInner, PyIntRef>>::try_from_object(vm, other.to_owned())?;
+                PyByteArray::sequence_downcast(seq).contains(other, vm)
+            }),
+            inplace_concat: atomic_func!(|seq, other, vm| {
+                let other = ArgBytesLike::try_from_object(vm, other.to_owned())?;
+                let zelf = PyByteArray::sequence_downcast(seq).to_owned();
+                PyByteArray::iadd(zelf, other, vm).map(|x| x.into())
+            }),
+            inplace_repeat: atomic_func!(|seq, n, vm| {
+                let zelf = PyByteArray::sequence_downcast(seq).to_owned();
+                PyByteArray::imul(zelf, n as isize, vm).map(|x| x.into())
+            }),
+        };
+        &AS_SEQUENCE
+    }
 }
 
 impl Unhashable for PyByteArray {}
@@ -854,7 +862,7 @@ impl PyPayload for PyByteArrayIterator {
     }
 }
 
-#[pyimpl(with(Constructor, IterNext))]
+#[pyclass(with(Constructor, IterNext))]
 impl PyByteArrayIterator {
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {

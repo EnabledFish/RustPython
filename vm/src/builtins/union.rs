@@ -1,12 +1,13 @@
-use super::genericalias;
+use super::{genericalias, type_};
 use crate::{
-    builtins::{PyFrozenSet, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef},
+    atomic_func,
+    builtins::{PyFrozenSet, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType},
     class::PyClassImpl,
     common::hash,
     convert::ToPyObject,
     function::PyComparisonValue,
     protocol::PyMappingMethods,
-    types::{AsMapping, Comparable, GetAttr, Hashable, Iterable, PyComparisonOp},
+    types::{AsMapping, Comparable, GetAttr, Hashable, PyComparisonOp},
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
     VirtualMachine,
 };
@@ -32,7 +33,7 @@ impl PyPayload for PyUnion {
     }
 }
 
-#[pyimpl(with(Hashable, Comparable, AsMapping), flags(BASETYPE))]
+#[pyclass(with(Hashable, Comparable, AsMapping), flags(BASETYPE))]
 impl PyUnion {
     pub fn new(args: PyTupleRef, vm: &VirtualMachine) -> Self {
         let parameters = make_parameters(&args, vm);
@@ -42,7 +43,7 @@ impl PyUnion {
     #[pymethod(magic)]
     fn repr(&self, vm: &VirtualMachine) -> PyResult<String> {
         fn repr_item(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<String> {
-            if vm.is_none(&obj) {
+            if obj.is(vm.ctx.types.none_type) {
                 return Ok("None".to_string());
             }
 
@@ -79,32 +80,56 @@ impl PyUnion {
             .join(" | "))
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn parameters(&self) -> PyObjectRef {
         self.parameters.clone().into()
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn args(&self) -> PyObjectRef {
         self.args.clone().into()
     }
 
     #[pymethod(magic)]
-    fn instancecheck(_zelf: PyRef<Self>, _obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        Err(vm
-            .new_type_error("isinstance() argument 2 cannot be a parameterized generic".to_owned()))
+    fn instancecheck(zelf: PyRef<Self>, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
+        if zelf
+            .args
+            .iter()
+            .any(|x| x.class().is(vm.ctx.types.generic_alias_type))
+        {
+            Err(vm.new_type_error(
+                "isinstance() argument 2 cannot be a parameterized generic".to_owned(),
+            ))
+        } else {
+            obj.is_instance(zelf.args().as_object(), vm)
+        }
     }
 
     #[pymethod(magic)]
-    fn subclasscheck(_zelf: PyRef<Self>, _obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        Err(vm
-            .new_type_error("issubclass() argument 2 cannot be a parameterized generic".to_owned()))
+    fn subclasscheck(zelf: PyRef<Self>, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
+        if zelf
+            .args
+            .iter()
+            .any(|x| x.class().is(vm.ctx.types.generic_alias_type))
+        {
+            Err(vm.new_type_error(
+                "issubclass() argument 2 cannot be a parameterized generic".to_owned(),
+            ))
+        } else {
+            obj.is_subclass(zelf.args().as_object(), vm)
+        }
+    }
+
+    #[pymethod(name = "__ror__")]
+    #[pymethod(magic)]
+    fn or(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
+        type_::or_(zelf, other, vm)
     }
 }
 
 pub fn is_unionable(obj: PyObjectRef, vm: &VirtualMachine) -> bool {
     obj.class().is(vm.ctx.types.none_type)
-        || obj.class().is(vm.ctx.types.type_type)
+        || obj.payload_if_subclass::<PyType>(vm).is_some()
         || obj.class().is(vm.ctx.types.generic_alias_type)
         || obj.class().is(vm.ctx.types.union_type)
 }
@@ -139,7 +164,7 @@ fn make_parameters(args: &PyTupleRef, vm: &VirtualMachine) -> PyTupleRef {
     }
     parameters.shrink_to_fit();
 
-    PyTuple::new_ref(parameters, &vm.ctx)
+    dedup_and_flatten_args(PyTuple::new_ref(parameters, &vm.ctx), vm)
 }
 
 fn flatten_args(args: PyTupleRef, vm: &VirtualMachine) -> PyTupleRef {
@@ -156,6 +181,8 @@ fn flatten_args(args: PyTupleRef, vm: &VirtualMachine) -> PyTupleRef {
     for arg in &args {
         if let Some(pyref) = arg.downcast_ref::<PyUnion>() {
             flattened_args.extend(pyref.args.iter().cloned());
+        } else if vm.is_none(arg) {
+            flattened_args.push(vm.ctx.types.none_type.to_owned().into());
         } else {
             flattened_args.push(arg.clone());
         };
@@ -170,21 +197,9 @@ fn dedup_and_flatten_args(args: PyTupleRef, vm: &VirtualMachine) -> PyTupleRef {
     let mut new_args: Vec<PyObjectRef> = Vec::with_capacity(args.len());
     for arg in &args {
         if !new_args.iter().any(|param| {
-            match (
-                PyTypeRef::try_from_object(vm, param.clone()),
-                PyTypeRef::try_from_object(vm, arg.clone()),
-            ) {
-                (Ok(a), Ok(b))
-                    if a.is(vm.ctx.types.generic_alias_type)
-                        && b.is(vm.ctx.types.generic_alias_type) =>
-                {
-                    param
-                        .rich_compare_bool(arg, PyComparisonOp::Eq, vm)
-                        .ok()
-                        .unwrap()
-                }
-                _ => param.is(arg),
-            }
+            param
+                .rich_compare_bool(arg, PyComparisonOp::Eq, vm)
+                .expect("types are always comparable")
         }) {
             new_args.push(arg.clone());
         }
@@ -227,13 +242,15 @@ impl PyUnion {
 }
 
 impl AsMapping for PyUnion {
-    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-        length: None,
-        subscript: Some(|mapping, needle, vm| {
-            Self::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
-        }),
-        ass_subscript: None,
-    };
+    fn as_mapping() -> &'static PyMappingMethods {
+        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+            subscript: atomic_func!(|mapping, needle, vm| {
+                PyUnion::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
+            }),
+            ..PyMappingMethods::NOT_IMPLEMENTED
+        };
+        &AS_MAPPING
+    }
 }
 
 impl Comparable for PyUnion {
@@ -245,9 +262,14 @@ impl Comparable for PyUnion {
     ) -> PyResult<PyComparisonValue> {
         op.eq_only(|| {
             let other = class_or_notimplemented!(Self, other);
+            let a = PyFrozenSet::from_iter(vm, zelf.args.into_iter().cloned())?;
+            let b = PyFrozenSet::from_iter(vm, other.args.into_iter().cloned())?;
             Ok(PyComparisonValue::Implemented(
-                zelf.args()
-                    .rich_compare_bool(other.args().as_ref(), PyComparisonOp::Eq, vm)?,
+                a.into_pyobject(vm).as_object().rich_compare_bool(
+                    b.into_pyobject(vm).as_object(),
+                    PyComparisonOp::Eq,
+                    vm,
+                )?,
             ))
         })
     }
@@ -256,8 +278,7 @@ impl Comparable for PyUnion {
 impl Hashable for PyUnion {
     #[inline]
     fn hash(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<hash::PyHash> {
-        let it = PyTuple::iter(zelf.args.clone(), vm);
-        let set = PyFrozenSet::from_iter(vm, it)?;
+        let set = PyFrozenSet::from_iter(vm, zelf.args.into_iter().cloned())?;
         PyFrozenSet::hash(&set.into_ref(vm), vm)
     }
 }

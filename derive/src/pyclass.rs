@@ -24,6 +24,7 @@ enum AttrName {
     Slot,
     Attr,
     ExtendClass,
+    Member,
 }
 
 impl std::fmt::Display for AttrName {
@@ -32,10 +33,11 @@ impl std::fmt::Display for AttrName {
             Self::Method => "pymethod",
             Self::ClassMethod => "pyclassmethod",
             Self::StaticMethod => "pystaticmethod",
-            Self::GetSet => "pyproperty",
+            Self::GetSet => "pygetset",
             Self::Slot => "pyslot",
             Self::Attr => "pyattr",
             Self::ExtendClass => "extend_class",
+            Self::Member => "pymember",
         };
         s.fmt(f)
     }
@@ -48,10 +50,11 @@ impl FromStr for AttrName {
             "pymethod" => Self::Method,
             "pyclassmethod" => Self::ClassMethod,
             "pystaticmethod" => Self::StaticMethod,
-            "pyproperty" => Self::GetSet,
+            "pygetset" => Self::GetSet,
             "pyslot" => Self::Slot,
             "pyattr" => Self::Attr,
             "extend_class" => Self::ExtendClass,
+            "pymember" => Self::Member,
             s => {
                 return Err(s.to_owned());
             }
@@ -63,6 +66,7 @@ impl FromStr for AttrName {
 struct ImplContext {
     impl_extend_items: ItemNursery,
     getset_items: GetSetNursery,
+    member_items: MemberNursery,
     extend_slots_items: ItemNursery,
     class_extensions: Vec<TokenStream>,
     errors: Vec<syn::Error>,
@@ -91,6 +95,7 @@ fn extract_items_into_context<'a, Item>(
         context.errors.ok_or_push(r);
     }
     context.errors.ok_or_push(context.getset_items.validate());
+    context.errors.ok_or_push(context.member_items.validate());
 }
 
 pub(crate) fn impl_pyimpl(attr: AttributeArgs, item: Item) -> Result<TokenStream> {
@@ -107,6 +112,7 @@ pub(crate) fn impl_pyimpl(attr: AttributeArgs, item: Item) -> Result<TokenStream
             } = extract_impl_attrs(attr, &Ident::new(&quote!(ty).to_string(), ty.span()))?;
 
             let getset_impl = &context.getset_items;
+            let member_impl = &context.member_items;
             let extend_impl = context.impl_extend_items.validate()?;
             let slots_impl = context.extend_slots_items.validate()?;
             let class_extensions = &context.class_extensions;
@@ -120,6 +126,7 @@ pub(crate) fn impl_pyimpl(attr: AttributeArgs, item: Item) -> Result<TokenStream
                         class: &'static ::rustpython_vm::Py<::rustpython_vm::builtins::PyType>,
                     ) {
                         #getset_impl
+                        #member_impl
                         #extend_impl
                         #with_impl
                         #(#class_extensions)*
@@ -143,6 +150,7 @@ pub(crate) fn impl_pyimpl(attr: AttributeArgs, item: Item) -> Result<TokenStream
             } = extract_impl_attrs(attr, &trai.ident)?;
 
             let getset_impl = &context.getset_items;
+            let member_impl = &context.member_items;
             let extend_impl = &context.impl_extend_items.validate()?;
             let slots_impl = &context.extend_slots_items.validate()?;
             let class_extensions = &context.class_extensions;
@@ -153,6 +161,7 @@ pub(crate) fn impl_pyimpl(attr: AttributeArgs, item: Item) -> Result<TokenStream
                         class: &'static ::rustpython_vm::Py<::rustpython_vm::builtins::PyType>,
                     ) {
                         #getset_impl
+                        #member_impl
                         #extend_impl
                         #with_impl
                         #(#class_extensions)*
@@ -373,7 +382,7 @@ pub(crate) fn impl_define_exception(exc_def: PyExceptionDef) -> Result<TokenStre
             }
         }
 
-        #[pyimpl(flags(BASETYPE, HAS_DICT))]
+        #[pyclass(flags(BASETYPE, HAS_DICT))]
         impl #class_name {
             #[pyslot]
             pub(crate) fn slot_new(
@@ -403,8 +412,8 @@ struct MethodItem {
     inner: ContentItemInner<AttrName>,
 }
 
-/// #[pyproperty]
-struct PropertyItem {
+/// #[pygetset]
+struct GetSetItem {
     inner: ContentItemInner<AttrName>,
 }
 
@@ -423,13 +432,18 @@ struct ExtendClassItem {
     inner: ContentItemInner<AttrName>,
 }
 
+/// #[pymember]
+struct MemberItem {
+    inner: ContentItemInner<AttrName>,
+}
+
 impl ContentItem for MethodItem {
     type AttrName = AttrName;
     fn inner(&self) -> &ContentItemInner<AttrName> {
         &self.inner
     }
 }
-impl ContentItem for PropertyItem {
+impl ContentItem for GetSetItem {
     type AttrName = AttrName;
     fn inner(&self) -> &ContentItemInner<AttrName> {
         &self.inner
@@ -448,6 +462,12 @@ impl ContentItem for AttributeItem {
     }
 }
 impl ContentItem for ExtendClassItem {
+    type AttrName = AttrName;
+    fn inner(&self) -> &ContentItemInner<AttrName> {
+        &self.inner
+    }
+}
+impl ContentItem for MemberItem {
     type AttrName = AttrName;
     fn inner(&self) -> &ContentItemInner<AttrName> {
         &self.inner
@@ -521,7 +541,7 @@ where
     }
 }
 
-impl<Item> ImplItem<Item> for PropertyItem
+impl<Item> ImplItem<Item> for GetSetItem
 where
     Item: ItemLike + ToTokens + GetIdent,
 {
@@ -533,9 +553,9 @@ where
         let ident = &func.sig().ident;
 
         let item_attr = args.attrs.remove(self.index());
-        let item_meta = PropertyItemMeta::from_attr(ident.clone(), &item_attr)?;
+        let item_meta = GetSetItemMeta::from_attr(ident.clone(), &item_attr)?;
 
-        let (py_name, kind) = item_meta.property_name()?;
+        let (py_name, kind) = item_meta.getset_name()?;
         args.context
             .getset_items
             .add_item(py_name, args.cfgs.to_vec(), kind, ident.clone())?;
@@ -564,9 +584,14 @@ where
         let slot_name = slot_ident.to_string();
         let tokens = {
             const NON_ATOMIC_SLOTS: &[&str] = &["as_buffer"];
+            const POINTER_SLOTS: &[&str] = &["as_number", "as_sequence", "as_mapping"];
             if NON_ATOMIC_SLOTS.contains(&slot_name.as_str()) {
                 quote_spanned! { span =>
                     slots.#slot_ident = Some(Self::#ident as _);
+                }
+            } else if POINTER_SLOTS.contains(&slot_name.as_str()) {
+                quote_spanned! { span =>
+                    slots.#slot_ident.store(Some(PointerSlot::from(Self::#ident())));
                 }
             } else {
                 quote_spanned! { span =>
@@ -656,6 +681,39 @@ where
     }
 }
 
+impl<Item> ImplItem<Item> for MemberItem
+where
+    Item: ItemLike + ToTokens + GetIdent,
+{
+    fn gen_impl_item(&self, args: ImplItemArgs<'_, Item>) -> Result<()> {
+        let func = args
+            .item
+            .function_or_method()
+            .map_err(|_| self.new_syn_error(args.item.span(), "can only be on a method"))?;
+        let ident = &func.sig().ident;
+
+        let item_attr = args.attrs.remove(self.index());
+        let item_meta = MemberItemMeta::from_attr(ident.clone(), &item_attr)?;
+
+        let (py_name, member_item_kind) = item_meta.member_name()?;
+        let member_kind = match item_meta.member_kind()? {
+            Some(s) => match s.as_str() {
+                "bool" => MemberKind::Bool,
+                _ => unreachable!(),
+            },
+            _ => MemberKind::ObjectEx,
+        };
+
+        args.context.member_items.add_item(
+            py_name,
+            member_item_kind,
+            member_kind,
+            ident.clone(),
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 #[allow(clippy::type_complexity)]
 struct GetSetNursery {
@@ -706,7 +764,7 @@ impl GetSetNursery {
             if getter.is_none() {
                 errors.push(syn::Error::new_spanned(
                     setter.as_ref().or(deleter.as_ref()).unwrap(),
-                    format!("Property '{}' is missing a getter", name),
+                    format!("GetSet '{}' is missing a getter", name),
                 ));
             };
         }
@@ -724,12 +782,12 @@ impl ToTokens for GetSetNursery {
             .iter()
             .map(|((name, cfgs), (getter, setter, deleter))| {
                 let setter = match setter {
-                    Some(setter) => quote_spanned! { setter.span() => .with_set(&Self::#setter)},
+                    Some(setter) => quote_spanned! { setter.span() => .with_set(Self::#setter)},
                     None => quote! {},
                 };
                 let deleter = match deleter {
                     Some(deleter) => {
-                        quote_spanned! { deleter.span() => .with_delete(&Self::#deleter)}
+                        quote_spanned! { deleter.span() => .with_delete(Self::#deleter)}
                     }
                     None => quote! {},
                 };
@@ -739,10 +797,99 @@ impl ToTokens for GetSetNursery {
                         #name,
                         ::rustpython_vm::PyRef::new_ref(
                             ::rustpython_vm::builtins::PyGetSet::new(#name.into(), class)
-                                .with_get(&Self::#getter)
+                                .with_get(Self::#getter)
                                 #setter #deleter,
                                 ctx.types.getset_type.to_owned(), None),
                         ctx
+                    );
+                }
+            });
+        tokens.extend(properties);
+    }
+}
+
+#[derive(Default)]
+#[allow(clippy::type_complexity)]
+struct MemberNursery {
+    map: HashMap<(String, MemberKind), (Option<Ident>, Option<Ident>)>,
+    validated: bool,
+}
+
+enum MemberItemKind {
+    Get,
+    Set,
+}
+
+#[derive(Eq, PartialEq, Hash)]
+enum MemberKind {
+    Bool,
+    ObjectEx,
+}
+
+impl MemberNursery {
+    fn add_item(
+        &mut self,
+        name: String,
+        kind: MemberItemKind,
+        member_kind: MemberKind,
+        item_ident: Ident,
+    ) -> Result<()> {
+        assert!(!self.validated, "new item is not allowed after validation");
+        let entry = self.map.entry((name.clone(), member_kind)).or_default();
+        let func = match kind {
+            MemberItemKind::Get => &mut entry.0,
+            MemberItemKind::Set => &mut entry.1,
+        };
+        if func.is_some() {
+            return Err(syn::Error::new_spanned(
+                item_ident,
+                format!("Multiple member accessors with name '{}'", name),
+            ));
+        }
+        *func = Some(item_ident);
+        Ok(())
+    }
+
+    fn validate(&mut self) -> Result<()> {
+        let mut errors = Vec::new();
+        for ((name, _), (getter, setter)) in &self.map {
+            if getter.is_none() {
+                errors.push(syn::Error::new_spanned(
+                    setter.as_ref().unwrap(),
+                    format!("Member '{}' is missing a getter", name),
+                ));
+            };
+        }
+        errors.into_result()?;
+        self.validated = true;
+        Ok(())
+    }
+}
+
+impl ToTokens for MemberNursery {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        assert!(self.validated, "Call `validate()` before token generation");
+        let properties = self
+            .map
+            .iter()
+            .map(|((name, member_kind), (getter, setter))| {
+                let setter = match setter {
+                    Some(setter) => quote_spanned! { setter.span() => Some(Self::#setter)},
+                    None => quote! { None },
+                };
+                let member_kind = match member_kind {
+                    MemberKind::Bool => {
+                        quote!(::rustpython_vm::builtins::descriptor::MemberKind::Bool)
+                    }
+                    MemberKind::ObjectEx => {
+                        quote!(::rustpython_vm::builtins::descriptor::MemberKind::ObjectEx)
+                    }
+                };
+                quote_spanned! { getter.span() =>
+                    class.set_str_attr(
+                        #name,
+                        ctx.new_member(#name, #member_kind, Self::#getter, #setter, class),
+                        ctx,
                     );
                 }
             });
@@ -781,9 +928,9 @@ impl MethodItemMeta {
     }
 }
 
-struct PropertyItemMeta(ItemMetaInner);
+struct GetSetItemMeta(ItemMetaInner);
 
-impl ItemMeta for PropertyItemMeta {
+impl ItemMeta for GetSetItemMeta {
     const ALLOWED_NAMES: &'static [&'static str] = &["name", "magic", "setter", "deleter"];
 
     fn from_inner(inner: ItemMetaInner) -> Self {
@@ -794,8 +941,8 @@ impl ItemMeta for PropertyItemMeta {
     }
 }
 
-impl PropertyItemMeta {
-    fn property_name(&self) -> Result<(String, GetSetItemKind)> {
+impl GetSetItemMeta {
+    fn getset_name(&self) -> Result<(String, GetSetItemKind)> {
         let inner = self.inner();
         let magic = inner._bool("magic")?;
         let kind = match (inner._bool("setter")?, inner._bool("deleter")?) {
@@ -925,6 +1072,69 @@ impl SlotItemMeta {
     }
 }
 
+struct MemberItemMeta(ItemMetaInner);
+
+impl ItemMeta for MemberItemMeta {
+    const ALLOWED_NAMES: &'static [&'static str] = &["magic", "type", "setter"];
+
+    fn from_inner(inner: ItemMetaInner) -> Self {
+        Self(inner)
+    }
+    fn inner(&self) -> &ItemMetaInner {
+        &self.0
+    }
+}
+
+impl MemberItemMeta {
+    fn member_name(&self) -> Result<(String, MemberItemKind)> {
+        let inner = self.inner();
+        let sig_name = inner.item_name();
+        let extract_prefix_name = |prefix, item_typ| {
+            if let Some(name) = sig_name.strip_prefix(prefix) {
+                if name.is_empty() {
+                    Err(syn::Error::new_spanned(
+                        &inner.meta_ident,
+                        format!(
+                            "A #[{}({typ})] fn with a {prefix}* name must \
+                             have something after \"{prefix}\"",
+                            inner.meta_name(),
+                            typ = item_typ,
+                            prefix = prefix
+                        ),
+                    ))
+                } else {
+                    Ok(name.to_owned())
+                }
+            } else {
+                Err(syn::Error::new_spanned(
+                    &inner.meta_ident,
+                    format!(
+                        "A #[{}(setter)] fn must either have a `name` \
+                         parameter or a fn name along the lines of \"set_*\"",
+                        inner.meta_name()
+                    ),
+                ))
+            }
+        };
+        let magic = inner._bool("magic")?;
+        let kind = if inner._bool("setter")? {
+            MemberItemKind::Set
+        } else {
+            MemberItemKind::Get
+        };
+        let name = match kind {
+            MemberItemKind::Get => sig_name,
+            MemberItemKind::Set => extract_prefix_name("set_", "setter")?,
+        };
+        Ok((if magic { format!("__{}__", name) } else { name }, kind))
+    }
+
+    fn member_kind(&self) -> Result<Option<String>> {
+        let inner = self.inner();
+        inner._optional_str("type")
+    }
+}
+
 struct ExtractedImplAttrs {
     with_impl: TokenStream,
     with_slots: TokenStream,
@@ -954,7 +1164,7 @@ fn extract_impl_attrs(attr: AttributeArgs, item: &Ident) -> Result<ExtractedImpl
                         let path = match meta {
                             NestedMeta::Meta(Meta::Path(path)) => path,
                             meta => {
-                                bail_span!(meta, "#[pyimpl(with(...))] arguments should be paths")
+                                bail_span!(meta, "#[pyclass(with(...))] arguments should be paths")
                             }
                         };
                         let (extend_class, extend_slots) = if path_eq(&path, "PyRef") {
@@ -988,12 +1198,12 @@ fn extract_impl_attrs(attr: AttributeArgs, item: &Ident) -> Result<ExtractedImpl
                                 } else {
                                     bail_span!(
                                         path,
-                                        "#[pyimpl(flags(...))] arguments should be ident"
+                                        "#[pyclass(flags(...))] arguments should be ident"
                                     )
                                 }
                             }
                             meta => {
-                                bail_span!(meta, "#[pyimpl(flags(...))] arguments should be ident")
+                                bail_span!(meta, "#[pyclass(flags(...))] arguments should be ident")
                             }
                         }
                     }
@@ -1032,7 +1242,7 @@ where
                 inner: ContentItemInner { index, attr_name },
             })
         }
-        GetSet => Box::new(PropertyItem {
+        GetSet => Box::new(GetSetItem {
             inner: ContentItemInner { index, attr_name },
         }),
         Slot => Box::new(SlotItem {
@@ -1042,6 +1252,9 @@ where
             inner: ContentItemInner { index, attr_name },
         }),
         ExtendClass => Box::new(ExtendClassItem {
+            inner: ContentItemInner { index, attr_name },
+        }),
+        Member => Box::new(MemberItem {
             inner: ContentItemInner { index, attr_name },
         }),
     })
@@ -1093,7 +1306,7 @@ where
                 if ALL_ALLOWED_NAMES.contains(&attr_name.as_str()) {
                     return Err(syn::Error::new_spanned(
                         attr,
-                        format!("#[pyimpl] doesn't accept #[{}]", wrong_name),
+                        format!("#[pyclass] doesn't accept #[{}]", wrong_name),
                     ));
                 } else {
                     continue;
@@ -1159,12 +1372,12 @@ fn parse_vec_ident(
     Ok(attr
         .get(index)
         .ok_or_else(|| {
-            syn::Error::new_spanned(&item, format!("We require {} argument to be set", &message))
+            syn::Error::new_spanned(item, format!("We require {} argument to be set", &message))
         })?
         .get_ident()
         .ok_or_else(|| {
             syn::Error::new_spanned(
-                &item,
+                item,
                 format!("We require {} argument to be ident or string", &message),
             )
         })?

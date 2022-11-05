@@ -56,7 +56,12 @@ pub mod module {
     #[pyattr]
     use libc::{PRIO_PGRP, PRIO_PROCESS, PRIO_USER};
 
-    #[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "linux"))]
+    #[cfg(any(
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "linux",
+        target_os = "macos"
+    ))]
     #[pyattr]
     use libc::{SEEK_DATA, SEEK_HOLE};
 
@@ -65,6 +70,9 @@ pub mod module {
     use libc::O_DSYNC;
     #[pyattr]
     use libc::{O_CLOEXEC, O_NONBLOCK, WNOHANG};
+    #[cfg(target_os = "macos")]
+    #[pyattr]
+    use libc::{O_EVTONLY, O_FSYNC, O_NOFOLLOW_ANY, O_SYMLINK};
     #[cfg(not(target_os = "redox"))]
     #[pyattr]
     use libc::{O_NDELAY, O_NOCTTY};
@@ -444,7 +452,7 @@ pub mod module {
                 )
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_vendor = "apple"))]
         fn mknod(self, vm: &VirtualMachine) -> PyResult<()> {
             let ret = match self.dir_fd.get_opt() {
                 None => self._mknod(vm)?,
@@ -463,7 +471,7 @@ pub mod module {
                 Ok(())
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         fn mknod(self, vm: &VirtualMachine) -> PyResult<()> {
             let ret = self._mknod(vm)?;
             if ret != 0 {
@@ -534,9 +542,9 @@ pub mod module {
         }
     }
 
-    #[pyimpl(with(Constructor))]
+    #[pyclass(with(Constructor))]
     impl SchedParam {
-        #[pyproperty]
+        #[pygetset]
         fn sched_priority(&self, vm: &VirtualMachine) -> PyObjectRef {
             self.sched_priority.clone().to_pyobject(vm)
         }
@@ -556,6 +564,7 @@ pub mod module {
             target_os = "freebsd",
             target_os = "android"
         ))]
+        #[cfg(not(target_env = "musl"))]
         fn try_to_libc(&self, vm: &VirtualMachine) -> PyResult<libc::sched_param> {
             use crate::AsObject;
             let priority_class = self.sched_priority.class();
@@ -625,6 +634,7 @@ pub mod module {
         target_os = "freebsd",
         target_os = "android"
     ))]
+    #[cfg(not(target_env = "musl"))]
     #[pyfunction]
     fn sched_setscheduler(args: SchedSetschedulerArgs, vm: &VirtualMachine) -> PyResult<i32> {
         let libc_sched_param = args.sched_param_obj.try_to_libc(vm)?;
@@ -675,6 +685,7 @@ pub mod module {
         target_os = "freebsd",
         target_os = "android"
     ))]
+    #[cfg(not(target_env = "musl"))]
     #[pyfunction]
     fn sched_setparam(args: SchedSetParamArgs, vm: &VirtualMachine) -> PyResult<i32> {
         let libc_sched_param = args.sched_param_obj.try_to_libc(vm)?;
@@ -1580,14 +1591,6 @@ pub mod module {
         ]
     }
 
-    /// Return a string containing the name of the user logged in on the
-    /// controlling terminal of the process.
-    ///
-    /// Exceptions:
-    ///
-    /// - `OSError`: Raised if login name could not be determined (`getlogin()`
-    ///   returned a null pointer).
-    /// - `UnicodeDecodeError`: Raised if login name contained invalid UTF-8 bytes.
     #[pyfunction]
     fn getlogin(vm: &VirtualMachine) -> PyResult<String> {
         // Get a pointer to the login name string. The string is statically

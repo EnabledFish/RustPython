@@ -97,7 +97,7 @@ impl Constructor for PySuper {
     }
 }
 
-#[pyimpl(with(GetAttr, GetDescriptor, Constructor))]
+#[pyclass(with(GetAttr, GetDescriptor, Constructor))]
 impl PySuper {
     fn new(typ: PyTypeRef, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {
         let obj = if vm.is_none(&obj) {
@@ -109,17 +109,17 @@ impl PySuper {
         Ok(Self { typ, obj })
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn thisclass(&self) -> PyTypeRef {
         self.typ.clone()
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn self_class(&self) -> Option<PyTypeRef> {
         Some(self.obj.as_ref()?.1.clone())
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn __self__(&self) -> Option<PyObjectRef> {
         Some(self.obj.as_ref()?.0.clone())
     }
@@ -188,7 +188,7 @@ impl GetDescriptor for PySuper {
             Ok(PySuper::new(zelf.typ.clone(), obj, vm)?.into_pyobject(vm))
         } else {
             let obj = vm.unwrap_or_none(zelf.obj.clone().map(|(o, _)| o));
-            vm.invoke(&zelf.class(), (zelf.typ.clone(), obj))
+            vm.invoke(zelf.class(), (zelf.typ.clone(), obj))
         }
     }
 }
@@ -200,7 +200,7 @@ fn supercheck(ty: PyTypeRef, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<
         }
     }
     if obj.fast_isinstance(&ty) {
-        return Ok(obj.class().clone());
+        return Ok(obj.class().to_owned());
     }
     let class_attr = obj.get_attr("__class__", vm)?;
     if let Ok(cls) = class_attr.downcast::<PyType>() {

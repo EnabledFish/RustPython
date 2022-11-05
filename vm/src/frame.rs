@@ -111,6 +111,10 @@ pub struct Frame {
     /// tracer function for this frame (usually is None)
     pub trace: PyMutex<PyObjectRef>,
     state: PyMutex<FrameState>,
+
+    // member
+    pub trace_lines: PyMutex<bool>,
+    pub temporary_refs: PyMutex<Vec<PyObjectRef>>,
 }
 
 impl PyPayload for Frame {
@@ -142,7 +146,7 @@ impl Frame {
             .collect();
 
         let state = FrameState {
-            stack: BoxVec::new(code.max_stacksize as usize),
+            stack: BoxVec::new(code.max_stackdepth as usize),
             blocks: Vec::new(),
             #[cfg(feature = "threading")]
             lasti: 0,
@@ -158,6 +162,8 @@ impl Frame {
             lasti: Lasti::new(0),
             state: PyMutex::new(state),
             trace: PyMutex::new(vm.ctx.none()),
+            trace_lines: PyMutex::new(true),
+            temporary_refs: PyMutex::new(vec![]),
         }
     }
 }
@@ -263,6 +269,27 @@ impl FrameRef {
         {
             self.lasti.get()
         }
+    }
+
+    pub fn is_internal_frame(&self) -> bool {
+        let code = self.clone().f_code();
+        let filename = code.co_filename();
+
+        filename.as_str().contains("importlib") && filename.as_str().contains("_bootstrap")
+    }
+
+    pub fn next_external_frame(&self, vm: &VirtualMachine) -> Option<FrameRef> {
+        self.clone().f_back(vm).map(|mut back| loop {
+            back = if let Some(back) = back.to_owned().f_back(vm) {
+                back
+            } else {
+                break back;
+            };
+
+            if !back.is_internal_frame() {
+                break back;
+            }
+        })
     }
 }
 
@@ -677,6 +704,15 @@ impl ExecutingFrame<'_> {
                 unpack,
                 for_call,
             } => self.execute_build_map(vm, *size, *unpack, *for_call),
+            bytecode::Instruction::DictUpdate => {
+                let other = self.pop_value();
+                let dict = self
+                    .last_value_ref()
+                    .downcast_ref::<PyDict>()
+                    .expect("exact dict expected");
+                dict.merge_object(other, vm)?;
+                Ok(None)
+            }
             bytecode::Instruction::BuildSlice { step } => self.execute_build_slice(vm, *step),
             bytecode::Instruction::ListAppend { i } => {
                 let item = self.pop_value();
@@ -775,20 +811,23 @@ impl ExecutingFrame<'_> {
             }
             bytecode::Instruction::SetupWith { end } => {
                 let context_manager = self.pop_value();
+                let enter_res = vm.call_special_method(
+                    context_manager.clone(),
+                    identifier!(vm, __enter__),
+                    (),
+                )?;
                 let exit = context_manager.get_attr(identifier!(vm, __exit__), vm)?;
                 self.push_value(exit);
-                // Call enter:
-                let enter_res =
-                    vm.call_special_method(context_manager, identifier!(vm, __enter__), ())?;
                 self.push_block(BlockType::Finally { handler: *end });
                 self.push_value(enter_res);
                 Ok(None)
             }
             bytecode::Instruction::BeforeAsyncWith => {
                 let mgr = self.pop_value();
+                let aenter_res =
+                    vm.call_special_method(mgr.clone(), identifier!(vm, __aenter__), ())?;
                 let aexit = mgr.get_attr(identifier!(vm, __aexit__), vm)?;
                 self.push_value(aexit);
-                let aenter_res = vm.call_special_method(mgr, identifier!(vm, __aenter__), ())?;
                 self.push_value(aenter_res);
 
                 Ok(None)
@@ -985,7 +1024,9 @@ impl ExecutingFrame<'_> {
 
             bytecode::Instruction::Raise { kind } => self.execute_raise(vm, *kind),
 
-            bytecode::Instruction::Break => self.unwind_blocks(vm, UnwindReason::Break),
+            bytecode::Instruction::Break { target: _ } => {
+                self.unwind_blocks(vm, UnwindReason::Break)
+            }
             bytecode::Instruction::Continue { target } => {
                 self.unwind_blocks(vm, UnwindReason::Continue { target: *target })
             }
@@ -1526,6 +1567,7 @@ impl ExecutingFrame<'_> {
             closure,
             defaults,
             kw_only_defaults,
+            PyMutex::new(qualified_name.clone()),
         )
         .into_pyobject(vm);
 
@@ -1793,7 +1835,7 @@ impl ExecutingFrame<'_> {
     fn push_value(&mut self, obj: PyObjectRef) {
         match self.state.stack.try_push(obj) {
             Ok(()) => {}
-            Err(_e) => self.fatal("tried to push value onto stack but overflowed max_stacksize"),
+            Err(_e) => self.fatal("tried to push value onto stack but overflowed max_stackdepth"),
         }
     }
 

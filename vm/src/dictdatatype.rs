@@ -99,23 +99,7 @@ struct DictEntry<T> {
 }
 static_assertions::assert_eq_size!(DictEntry<PyObjectRef>, Option<DictEntry<PyObjectRef>>);
 
-impl<T: Clone> DictEntry<T> {
-    pub(crate) fn as_tuple(&self) -> (PyObjectRef, T) {
-        (self.key.clone(), self.value.clone())
-    }
-}
-
-impl<T: Clone> Dict<T> {
-    pub(crate) fn as_kvpairs(&self) -> Vec<(PyObjectRef, T)> {
-        let entries = &self.inner.read().entries;
-        entries
-            .iter()
-            .filter_map(|entry| entry.as_ref().map(|dict_entry| dict_entry.as_tuple()))
-            .collect()
-    }
-}
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct DictSize {
     indices_size: usize,
     pub entries_size: usize,
@@ -231,6 +215,14 @@ impl<T> DictInner<T> {
             None
         }
     }
+
+    #[inline]
+    fn get_entry_checked(&self, idx: EntryIndex, index_index: IndexIndex) -> Option<&DictEntry<T>> {
+        match self.entries.get(idx) {
+            Some(Some(entry)) if entry.index == index_index => Some(entry),
+            _ => None,
+        }
+    }
 }
 
 type PopInnerResult<T> = ControlFlow<Option<DictEntry<T>>>;
@@ -300,13 +292,8 @@ impl<T: Clone> Dict<T> {
             let (entry, index_index) = self.lookup(vm, key, hash, None)?;
             if let Some(index) = entry.index() {
                 let inner = self.read();
-                if let Some(entry) = inner.entries.get(index) {
-                    let entry = extract_dict_entry(entry);
-                    if entry.index == index_index {
-                        break Some(entry.value.clone());
-                    } else {
-                        // stuff shifted around, let's try again
-                    }
+                if let Some(entry) = inner.get_entry_checked(index, index_index) {
+                    break Some(entry.value.clone());
                 } else {
                     // The dict was changed since we did lookup. Let's try again.
                     continue;
@@ -411,13 +398,8 @@ impl<T: Clone> Dict<T> {
             let (index_entry, index_index) = lookup;
             if let Some(index) = index_entry.index() {
                 let inner = self.read();
-                if let Some(entry) = inner.entries.get(index) {
-                    let entry = extract_dict_entry(entry);
-                    if entry.index == index_index {
-                        break entry.value.clone();
-                    } else {
-                        // stuff shifted around, let's try again
-                    }
+                if let Some(entry) = inner.get_entry_checked(index, index_index) {
+                    break entry.value.clone();
                 } else {
                     // The dict was changed since we did lookup, let's try again.
                     continue;
@@ -455,13 +437,8 @@ impl<T: Clone> Dict<T> {
             let (index_entry, index_index) = lookup;
             if let Some(index) = index_entry.index() {
                 let inner = self.read();
-                if let Some(entry) = inner.entries.get(index) {
-                    let entry = extract_dict_entry(entry);
-                    if entry.index == index_index {
-                        break (entry.key.clone(), entry.value.clone());
-                    } else {
-                        // stuff shifted around, let's try again
-                    }
+                if let Some(entry) = inner.get_entry_checked(index, index_index) {
+                    break (entry.key.clone(), entry.value.clone());
                 } else {
                     // The dict was changed since we did lookup, let's try again.
                     continue;
@@ -717,7 +694,7 @@ impl DictKey for PyObject {
     }
     #[inline]
     fn key_as_isize(&self, vm: &VirtualMachine) -> PyResult<isize> {
-        vm.to_index(self)?.try_to_primitive(vm)
+        self.try_index(vm)?.try_to_primitive(vm)
     }
 }
 
@@ -902,12 +879,6 @@ fn str_exact<'a>(obj: &'a PyObject, vm: &VirtualMachine) -> Option<&'a PyStr> {
     }
 }
 
-fn extract_dict_entry<T>(option_entry: &Option<DictEntry<T>>) -> &DictEntry<T> {
-    option_entry
-        .as_ref()
-        .expect("The dict was changed since we did lookup.")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Dict, DictKey};
@@ -922,27 +893,27 @@ mod tests {
 
             let key1 = vm.new_pyobj(true);
             let value1 = vm.new_pyobj(ascii!("abc"));
-            dict.insert(&vm, &*key1, value1.clone()).unwrap();
+            dict.insert(vm, &*key1, value1).unwrap();
             assert_eq!(1, dict.len());
 
             let key2 = vm.new_pyobj(ascii!("x"));
             let value2 = vm.new_pyobj(ascii!("def"));
-            dict.insert(&vm, &*key2, value2.clone()).unwrap();
+            dict.insert(vm, &*key2, value2.clone()).unwrap();
             assert_eq!(2, dict.len());
 
-            dict.insert(&vm, &*key1, value2.clone()).unwrap();
+            dict.insert(vm, &*key1, value2.clone()).unwrap();
             assert_eq!(2, dict.len());
 
-            dict.delete(&vm, &*key1).unwrap();
+            dict.delete(vm, &*key1).unwrap();
             assert_eq!(1, dict.len());
 
-            dict.insert(&vm, &*key1, value2.clone()).unwrap();
+            dict.insert(vm, &*key1, value2.clone()).unwrap();
             assert_eq!(2, dict.len());
 
-            assert_eq!(true, dict.contains(&vm, &*key1).unwrap());
-            assert_eq!(true, dict.contains(&vm, "x").unwrap());
+            assert_eq!(true, dict.contains(vm, &*key1).unwrap());
+            assert_eq!(true, dict.contains(vm, "x").unwrap());
 
-            let val = dict.get(&vm, "x").unwrap().unwrap();
+            let val = dict.get(vm, "x").unwrap().unwrap();
             vm.bool_eq(&val, &value2)
                 .expect("retrieved value must be equal to inserted value.");
         })
@@ -969,8 +940,8 @@ mod tests {
             let value1 = text;
             let value2 = vm.new_pyobj(value1.to_owned());
 
-            let hash1 = value1.key_hash(&vm).expect("Hash should not fail.");
-            let hash2 = value2.key_hash(&vm).expect("Hash should not fail.");
+            let hash1 = value1.key_hash(vm).expect("Hash should not fail.");
+            let hash2 = value2.key_hash(vm).expect("Hash should not fail.");
             assert_eq!(hash1, hash2);
         })
     }
